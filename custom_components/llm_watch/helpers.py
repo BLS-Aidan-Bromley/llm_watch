@@ -26,23 +26,74 @@ EXTRACT_TEMPLATE = (
     "list with loosely related products. Prices must be numbers without "
     "currency symbols. Set in_stock true only if the page indicates the item "
     "can be bought or obtained now; false if it says out of stock, sold out "
-    "or unavailable; leave it unset if the page does not say. If nothing "
-    "matches, return found=false with an empty items list and a one-sentence "
-    "summary of what the page showed instead. Never invent items that are "
-    "not on the page.\n\n"
+    "or unavailable; leave it unset if the page does not say. "
+    "Never output any URLs or links in any field; leave links out entirely. "
+    "{shopping_rule}"
+    "If nothing matches, return found=false with an empty items list and a "
+    "one-sentence summary of what the page showed instead. Never invent items "
+    "that are not on the page.\n\n"
     "The user is looking for: {prompt}\n\n"
     "Page URL: {url}\n\n"
     "Page content:\n{page_text}"
 )
 
+SHOPPING_RULE = (
+    "This is a shopping search: only report items from a page where the item "
+    "can actually be bought, i.e. a retailer product or listing page. If this "
+    "page is a forum or discussion thread, a review or roundup article, a "
+    "'best of' or recommendations listicle, a news article, or any page that "
+    "only talks about products rather than selling them, return found=false "
+    "with an empty items list, whatever products it mentions. "
+)
+
 QUERY_TEMPLATE = (
     "You write web search queries for a shopping and deals watcher. "
     "Produce 2 or 3 short, distinct search queries (4-8 words each, no "
-    "quotes, no site: operators) that would find current offers, product "
-    "listings or availability for what the user describes. Focus on pages "
-    "that list products with prices.\n\n"
+    "quotes, no site: operators) that would find {target} for what the user "
+    "describes.\n\n"
     "The user is looking for: {prompt}"
 )
+QUERY_TARGET_SHOPPING = (
+    "retailer product pages where the item can be bought, with prices and "
+    "stock; prefer shop and store pages over articles or forums"
+)
+QUERY_TARGET_GENERAL = "current offers, product listings or availability"
+
+
+_URL_RE = re.compile(r"\bhttps?://\S+|\bwww\.\S+", re.IGNORECASE)
+
+
+def _strip_urls(value: Any) -> Any:
+    """Remove any URLs a model put in a text field; models fabricate these."""
+    if not isinstance(value, str):
+        return value
+    cleaned = _URL_RE.sub("", value)
+    # Tidy leftover brackets/whitespace from removed markdown links.
+    cleaned = re.sub(r"[\[\]()]{1,}", " ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -–—:")
+    return cleaned or None
+
+
+def host_of(url: str) -> str:
+    """Bare hostname of a URL, without a leading www."""
+    netloc = urlparse(url).netloc or url
+    return netloc.split("@")[-1].split(":")[0].removeprefix("www.").lower()
+
+
+def parse_blocklist(text: str | None, defaults: list[str]) -> list[str]:
+    """Merge the default blocklist with a user's comma-separated additions."""
+    hosts = set(defaults)
+    for part in (text or "").split(","):
+        part = part.strip().lower().removeprefix("www.")
+        if part:
+            hosts.add(part)
+    return sorted(hosts)
+
+
+def is_blocked(url: str, blocklist: list[str]) -> bool:
+    """True if the URL's host is, or is a subdomain of, a blocked host."""
+    host = host_of(url)
+    return any(host == b or host.endswith("." + b) for b in blocklist)
 
 
 def clean_html(raw: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
@@ -75,14 +126,22 @@ def looks_like_json(content_type: str | None, body: str) -> bool:
     return stripped.startswith("{") or stripped.startswith("[")
 
 
-def build_extract_instructions(prompt: str, url: str, page_text: str) -> str:
+def build_extract_instructions(
+    prompt: str, url: str, page_text: str, shopping: bool = False
+) -> str:
     """Build the extraction instructions for the AI Task."""
-    return EXTRACT_TEMPLATE.format(prompt=prompt, url=url, page_text=page_text)
+    return EXTRACT_TEMPLATE.format(
+        prompt=prompt,
+        url=url,
+        page_text=page_text,
+        shopping_rule=SHOPPING_RULE if shopping else "",
+    )
 
 
-def build_query_instructions(prompt: str) -> str:
+def build_query_instructions(prompt: str, shopping: bool = False) -> str:
     """Build the query generation instructions for the AI Task."""
-    return QUERY_TEMPLATE.format(prompt=prompt)
+    target = QUERY_TARGET_SHOPPING if shopping else QUERY_TARGET_GENERAL
+    return QUERY_TEMPLATE.format(prompt=prompt, target=target)
 
 
 def parse_queries(content: Any, max_queries: int) -> list[str]:
@@ -135,11 +194,11 @@ def parse_result(content: Any) -> dict[str, Any]:
                 in_stock = bool(in_stock)
             items.append(
                 {
-                    "name": str(entry.get("name")),
+                    "name": _strip_urls(str(entry.get("name"))),
                     "price": price,
-                    "availability": entry.get("availability"),
+                    "availability": _strip_urls(entry.get("availability")),
                     "in_stock": in_stock,
-                    "detail": entry.get("detail"),
+                    "detail": _strip_urls(entry.get("detail")),
                 }
             )
 

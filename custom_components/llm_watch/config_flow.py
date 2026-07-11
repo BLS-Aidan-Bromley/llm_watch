@@ -40,8 +40,10 @@ from .const import (
     CONF_MODE,
     CONF_NAME,
     CONF_PROMPT,
+    CONF_BLOCKLIST,
     CONF_REQUIRE_IN_STOCK,
     CONF_SCAN_INTERVAL_HOURS,
+    CONF_SHOPPING_ONLY,
     CONF_SEARXNG_URL,
     CONF_SITES,
     CONF_URL,
@@ -130,6 +132,19 @@ def _watch_schema(kind: str, defaults: dict[str, Any]) -> vol.Schema:
         ] = SelectSelector(SelectSelectorConfig(options=MODES, translation_key="mode"))
     else:
         _optional(schema, CONF_SITES, defaults, TextSelector(TextSelectorConfig()))
+    if kind == SUBENTRY_SEARCH_WATCH:
+        schema[
+            vol.Required(
+                CONF_SHOPPING_ONLY,
+                default=defaults.get(CONF_SHOPPING_ONLY, True),
+            )
+        ] = bool
+        _optional(
+            schema,
+            CONF_BLOCKLIST,
+            defaults,
+            TextSelector(TextSelectorConfig(multiline=True)),
+        )
     schema[
         vol.Required(
             CONF_REQUIRE_IN_STOCK,

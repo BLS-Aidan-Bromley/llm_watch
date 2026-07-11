@@ -27,10 +27,13 @@ from .const import (
     CONF_MODE,
     CONF_NAME,
     CONF_PROMPT,
+    CONF_BLOCKLIST,
     CONF_REQUIRE_IN_STOCK,
     CONF_SCAN_INTERVAL_HOURS,
+    CONF_SHOPPING_ONLY,
     CONF_SITES,
     CONF_URL,
+    DEFAULT_BLOCKLIST,
     DEFAULT_SCAN_INTERVAL_HOURS,
     DOMAIN,
     EVENT_FOUND,
@@ -50,6 +53,7 @@ from .helpers import (
     clean_json,
     filter_items,
     looks_like_json,
+    parse_blocklist,
     parse_queries,
     parse_result,
 )
@@ -146,13 +150,14 @@ async def _extract(
     prompt: str,
     url: str,
     page_text: str,
+    shopping: bool = False,
 ) -> dict[str, Any]:
     """One extraction call against the AI Task provider."""
     task_result = await async_generate_data(
         hass,
         task_name=f"LLM Watch: {name}",
         entity_id=entity_id or None,
-        instructions=build_extract_instructions(prompt, url, page_text),
+        instructions=build_extract_instructions(prompt, url, page_text, shopping),
         structure=RESULT_STRUCTURE,
     )
     return parse_result(task_result.data)
@@ -191,6 +196,7 @@ async def run_page_check(
         config[CONF_PROMPT],
         config[CONF_URL],
         page_text,
+        bool(config.get(CONF_SHOPPING_ONLY)),
     )
     for item in result["items"]:
         item["source"] = config[CONF_URL]
@@ -214,11 +220,12 @@ async def run_search_check(
     name = config[CONF_NAME]
     prompt = config[CONF_PROMPT]
 
+    shopping = bool(config.get(CONF_SHOPPING_ONLY))
     query_result = await async_generate_data(
         hass,
         task_name=f"LLM Watch queries: {name}",
         entity_id=entity_id or None,
-        instructions=build_query_instructions(prompt),
+        instructions=build_query_instructions(prompt, shopping),
         structure=QUERY_STRUCTURE,
     )
     queries = parse_queries(query_result.data, MAX_QUERIES)
@@ -226,8 +233,13 @@ async def run_search_check(
         # Model failed to produce queries; fall back to the raw description.
         queries = [prompt[:100]]
 
+    blocklist = (
+        parse_blocklist(config.get(CONF_BLOCKLIST), DEFAULT_BLOCKLIST)
+        if shopping
+        else None
+    )
     candidates = await gather_candidates(
-        session, hub, queries, config.get(CONF_SITES), MAX_PAGES
+        session, hub, queries, config.get(CONF_SITES), MAX_PAGES, blocklist
     )
     if not candidates:
         raise UpdateFailed(
@@ -246,7 +258,9 @@ async def run_search_check(
                 page_text = cand["content"][:MAX_CONTENT_CHARS]
             else:
                 page_text = await fetch_page_text(session, url)
-            result = await _extract(hass, name, entity_id, prompt, url, page_text)
+            result = await _extract(
+                hass, name, entity_id, prompt, url, page_text, shopping
+            )
         except (TimeoutError, aiohttp.ClientError, UpdateFailed, ValueError) as err:
             _LOGGER.debug("Skipping candidate %s: %s", url, err)
             continue

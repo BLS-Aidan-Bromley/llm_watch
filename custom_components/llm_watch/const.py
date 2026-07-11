@@ -21,6 +21,8 @@ CONF_PROMPT = "prompt"
 CONF_MODE = "mode"
 CONF_SITES = "sites"
 CONF_REQUIRE_IN_STOCK = "require_in_stock"
+CONF_SHOPPING_ONLY = "shopping_only"
+CONF_BLOCKLIST = "blocklist"
 CONF_MAX_PRICE = "max_price"
 CONF_SCAN_INTERVAL_HOURS = "scan_interval_hours"
 CONF_CREATE_ANYWAY = "create_anyway"
@@ -45,6 +47,29 @@ MAX_CONTENT_CHARS = 15000
 MAX_QUERIES = 3
 MAX_RESULTS_PER_QUERY = 3
 MAX_PAGES = 5
+
+# Forum, review, roundup and aggregator sites dropped from shopping searches
+# before any page is fetched. Editable per watch.
+DEFAULT_BLOCKLIST = [
+    "reddit.com",
+    "quora.com",
+    "pinterest.com",
+    "pinterest.co.uk",
+    "youtube.com",
+    "facebook.com",
+    "twitter.com",
+    "x.com",
+    "tiktok.com",
+    "trustpilot.com",
+    "which.co.uk",
+    "tripadvisor.com",
+    "tripadvisor.co.uk",
+    "wikipedia.org",
+    "medium.com",
+    "hotukdeals.com",
+    "money.co.uk",
+    "moneysavingexpert.com",
+]
 
 FETCH_TIMEOUT = 30
 

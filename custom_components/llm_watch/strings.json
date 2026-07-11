@@ -113,6 +113,8 @@
             "name": "Watch name",
             "prompt": "What are you looking for?",
             "sites": "Restrict to these sites",
+            "shopping_only": "Shopping results only",
+            "blocklist": "Extra sites to block",
             "require_in_stock": "Only count items that are in stock",
             "max_price": "Maximum price",
             "ai_task_entity": "AI Task entity (override)",
@@ -121,7 +123,9 @@
           },
           "data_description": {
             "prompt": "For example: a portable air conditioning unit, at least 9000 BTU, from a UK retailer.",
-            "sites": "Optional, comma separated (e.g. screwfix.com, argos.co.uk). Best for stock checks at specific retailers."
+            "sites": "Optional, comma separated (e.g. screwfix.com, argos.co.uk). Best for stock checks at specific retailers.",
+            "shopping_only": "Only accept pages you can actually buy from. Drops forums, reviews, roundups and 'best of' articles, and blocks common non-shop sites (Reddit, YouTube, Trustpilot, etc.).",
+            "blocklist": "Optional, comma separated. Added to the built-in blocklist (e.g. argos-reviews.com)."
           }
         },
         "preview": {
@@ -134,6 +138,8 @@
             "name": "Watch name",
             "prompt": "What are you looking for?",
             "sites": "Restrict to these sites",
+            "shopping_only": "Shopping results only",
+            "blocklist": "Extra sites to block",
             "require_in_stock": "Only count items that are in stock",
             "max_price": "Maximum price",
             "ai_task_entity": "AI Task entity (override)",

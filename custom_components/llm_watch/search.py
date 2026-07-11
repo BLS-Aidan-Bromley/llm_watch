@@ -19,7 +19,7 @@ from .const import (
     FETCH_TIMEOUT,
     MAX_RESULTS_PER_QUERY,
 )
-from .helpers import site_hosts
+from .helpers import is_blocked, site_hosts
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -137,6 +137,7 @@ async def gather_candidates(
     queries: list[str],
     sites: str | None,
     max_pages: int,
+    blocklist: list[str] | None = None,
 ) -> list[Candidate]:
     """Turn queries into a deduplicated list of candidate pages.
 
@@ -169,6 +170,9 @@ async def gather_candidates(
         for cand in results:
             key = cand["url"].split("#")[0].rstrip("/")
             if key in seen:
+                continue
+            if blocklist and is_blocked(cand["url"], blocklist):
+                _LOGGER.debug("Blocklisted candidate skipped: %s", cand["url"])
                 continue
             seen.add(key)
             out.append(cand)

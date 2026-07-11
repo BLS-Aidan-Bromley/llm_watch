@@ -13,9 +13,9 @@ on this page?"
 **Web search watch** — no URL. Each run, the AI writes search queries from
 your description, SearXNG finds candidate pages, each page is fetched and
 judged by the AI against your description, and the results are merged. Optional
-criteria: only count items that are in stock, and a maximum price. Optionally
-restrict the search to specific retail sites, which is the reliable way to do
-stock checks.
+criteria: shopping-results-only (drops forums, reviews and roundups), only
+count items that are in stock, and a maximum price. Optionally restrict the
+search to specific retail sites, which is the reliable way to do stock checks.
 
 Every watch gives you:
 
@@ -115,6 +115,13 @@ reconfiguring the hub if you want search watches.
 
 - Results are judgements by your model on page text; the pre-create test run
   is there to tune the description. Smaller local models are more literal.
+- Links shown for each item are the real page the content came from. The
+  model is barred from writing URLs (it fabricates them), so if a page has no
+  clean source you get the item without a working link rather than a fake one.
+- Shopping-results-only filters twice: a built-in blocklist (Reddit, YouTube,
+  Trustpilot and similar, editable per watch) drops junk before fetching, and
+  the model is told to reject forum, review and roundup pages. A small model
+  will still occasionally misjudge a borderline page.
 - JavaScript-only pages can't be read. Page watches should use the site's
   JSON API for those; search watches skip unreadable pages automatically.
 - Sites behind aggressive bot protection will fail to fetch.
