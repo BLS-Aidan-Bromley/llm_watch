@@ -1,4 +1,4 @@
-"""Coordinator for LLM Watch."""
+"""Coordinators for LLM Watch page and search watches."""
 
 from __future__ import annotations
 
@@ -8,39 +8,51 @@ from datetime import timedelta
 from typing import Any
 
 import aiohttp
+import voluptuous as vol
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.ai_task import async_generate_data
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_AI_TASK_ENTITY,
+    CONF_MAX_PRICE,
     CONF_MODE,
-    CONF_MODEL,
     CONF_NAME,
-    CONF_OLLAMA_URL,
     CONF_PROMPT,
+    CONF_REQUIRE_IN_STOCK,
     CONF_SCAN_INTERVAL_HOURS,
+    CONF_SEARXNG_URL,
+    CONF_SITES,
     CONF_URL,
-    DEFAULT_MODEL,
-    DEFAULT_OLLAMA_URL,
     DEFAULT_SCAN_INTERVAL_HOURS,
     DOMAIN,
     EVENT_FOUND,
+    EVENT_PRICE_DROP,
     FETCH_TIMEOUT,
+    MAX_PAGES,
+    MAX_QUERIES,
     MODE_AUTO,
     MODE_JSON,
-    OLLAMA_TIMEOUT,
+    SUBENTRY_SEARCH_WATCH,
 )
 from .helpers import (
-    RESULT_SCHEMA,
-    build_messages,
+    best_price,
+    build_extract_instructions,
+    build_query_instructions,
     clean_html,
     clean_json,
+    filter_items,
     looks_like_json,
+    parse_queries,
     parse_result,
 )
+from .search import gather_candidates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,17 +65,60 @@ _FETCH_HEADERS = {
     "Accept-Language": "en-GB,en;q=0.9",
 }
 
+# Structured output definitions handed to the AI Task provider. Selector
+# based, so every provider (Ollama, OpenAI, Anthropic, Google, ...) converts
+# them to its own structured-output format.
+RESULT_STRUCTURE = vol.Schema(
+    {
+        vol.Required(
+            "found",
+            description="Whether the page contains what the user asked for",
+        ): selector.selector({"boolean": {}}),
+        vol.Required(
+            "summary",
+            description="One or two sentences on what was (or was not) found",
+        ): selector.selector({"text": {}}),
+        vol.Required(
+            "items",
+            description="The matching items. Empty list if nothing matches.",
+        ): selector.ObjectSelector(
+            {
+                "multiple": True,
+                "fields": {
+                    "name": {"required": True, "selector": {"text": {}}},
+                    "price": {
+                        "selector": {"number": {"mode": "box", "step": 0.01}}
+                    },
+                    "availability": {"selector": {"text": {}}},
+                    "in_stock": {"selector": {"boolean": {}}},
+                    "detail": {"selector": {"text": {}}},
+                },
+            }
+        ),
+    }
+)
 
-async def run_check(
-    session: aiohttp.ClientSession, config: dict[str, Any]
-) -> dict[str, Any]:
-    """Fetch the page and ask the model about it. Shared with the config flow."""
-    url: str = config[CONF_URL]
-    mode: str = config.get(CONF_MODE, MODE_AUTO)
-    ollama_url: str = config.get(CONF_OLLAMA_URL, DEFAULT_OLLAMA_URL).rstrip("/")
-    model: str = config.get(CONF_MODEL, DEFAULT_MODEL)
-    prompt: str = config[CONF_PROMPT]
+QUERY_STRUCTURE = vol.Schema(
+    {
+        vol.Required(
+            "queries",
+            description="Two or three short, distinct web search queries",
+        ): selector.ObjectSelector(
+            {
+                "multiple": True,
+                "fields": {
+                    "query": {"required": True, "selector": {"text": {}}},
+                },
+            }
+        ),
+    }
+)
 
+
+async def fetch_page_text(
+    session: aiohttp.ClientSession, url: str, mode: str = MODE_AUTO
+) -> str:
+    """Fetch a URL and reduce it to model-readable text."""
     async with asyncio.timeout(FETCH_TIMEOUT):
         resp = await session.get(url, headers=_FETCH_HEADERS)
         resp.raise_for_status()
@@ -80,68 +135,208 @@ async def run_check(
             "Page produced almost no text. It is probably rendered with "
             "JavaScript; point the watch at the site's JSON API instead."
         )
+    return page_text
 
-    payload = {
-        "model": model,
-        "messages": build_messages(prompt, url, page_text),
-        "format": RESULT_SCHEMA,
-        "stream": False,
-        "options": {"temperature": 0},
+
+async def _extract(
+    hass: HomeAssistant,
+    name: str,
+    entity_id: str | None,
+    prompt: str,
+    url: str,
+    page_text: str,
+) -> dict[str, Any]:
+    """One extraction call against the AI Task provider."""
+    task_result = await async_generate_data(
+        hass,
+        task_name=f"LLM Watch: {name}",
+        entity_id=entity_id or None,
+        instructions=build_extract_instructions(prompt, url, page_text),
+        structure=RESULT_STRUCTURE,
+    )
+    return parse_result(task_result.data)
+
+
+def _apply_criteria(result: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """Filter items by the watch criteria and recompute found."""
+    has_criteria = bool(config.get(CONF_REQUIRE_IN_STOCK)) or (
+        config.get(CONF_MAX_PRICE) is not None
+    )
+    items = filter_items(
+        result["items"],
+        bool(config.get(CONF_REQUIRE_IN_STOCK)),
+        config.get(CONF_MAX_PRICE),
+    )
+    return {
+        "found": bool(items) if has_criteria else result["found"],
+        "summary": result["summary"],
+        "items": items,
     }
-    async with asyncio.timeout(OLLAMA_TIMEOUT):
-        resp = await session.post(f"{ollama_url}/api/chat", json=payload)
-        resp.raise_for_status()
-        reply = await resp.json()
 
-    content = (reply.get("message") or {}).get("content", "")
-    result = parse_result(content)
+
+async def run_page_check(
+    hass: HomeAssistant, config: dict[str, Any], hub: dict[str, Any]
+) -> dict[str, Any]:
+    """Check a single page watch. Shared with the config flow."""
+    session = async_get_clientsession(hass)
+    page_text = await fetch_page_text(
+        session, config[CONF_URL], config.get(CONF_MODE, MODE_AUTO)
+    )
+    entity_id = config.get(CONF_AI_TASK_ENTITY) or hub.get(CONF_AI_TASK_ENTITY)
+    result = await _extract(
+        hass,
+        config[CONF_NAME],
+        entity_id,
+        config[CONF_PROMPT],
+        config[CONF_URL],
+        page_text,
+    )
+    for item in result["items"]:
+        item["source"] = config[CONF_URL]
+    result = _apply_criteria(result, config)
     result["checked_at"] = dt_util.now().isoformat()
     return result
 
 
-class LlmWatchCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Runs one watch on a schedule."""
+async def run_search_check(
+    hass: HomeAssistant, config: dict[str, Any], hub: dict[str, Any]
+) -> dict[str, Any]:
+    """Check a search watch: queries -> SearXNG -> pages -> extraction."""
+    searxng_url = hub.get(CONF_SEARXNG_URL)
+    if not searxng_url:
+        raise UpdateFailed(
+            "No SearXNG URL configured on the LLM Watch hub; search watches "
+            "need one. Reconfigure the integration."
+        )
+    session = async_get_clientsession(hass)
+    entity_id = config.get(CONF_AI_TASK_ENTITY) or hub.get(CONF_AI_TASK_ENTITY)
+    name = config[CONF_NAME]
+    prompt = config[CONF_PROMPT]
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    query_result = await async_generate_data(
+        hass,
+        task_name=f"LLM Watch queries: {name}",
+        entity_id=entity_id or None,
+        instructions=build_query_instructions(prompt),
+        structure=QUERY_STRUCTURE,
+    )
+    queries = parse_queries(query_result.data, MAX_QUERIES)
+    if not queries:
+        # Model failed to produce queries; fall back to the raw description.
+        queries = [prompt[:100]]
+
+    candidates = await gather_candidates(
+        session, searxng_url, queries, config.get(CONF_SITES), MAX_PAGES
+    )
+    if not candidates:
+        raise UpdateFailed(
+            "SearXNG returned no results. Check the SearXNG URL, that its "
+            "JSON format is enabled, and that the description is searchable."
+        )
+
+    all_items: list[dict[str, Any]] = []
+    summaries: list[str] = []
+    pages_checked = 0
+    for url in candidates:
+        try:
+            page_text = await fetch_page_text(session, url)
+            result = await _extract(hass, name, entity_id, prompt, url, page_text)
+        except (TimeoutError, aiohttp.ClientError, UpdateFailed, ValueError) as err:
+            _LOGGER.debug("Skipping candidate %s: %s", url, err)
+            continue
+        pages_checked += 1
+        if result["found"]:
+            for item in result["items"]:
+                item["source"] = url
+            all_items.extend(result["items"])
+            summaries.append(result["summary"])
+
+    if pages_checked == 0:
+        raise UpdateFailed(
+            "None of the search results could be read (JavaScript-only pages "
+            "or fetch failures)."
+        )
+
+    aggregated = {
+        "found": bool(all_items),
+        "summary": " ".join(summaries[:3]) if summaries else "Nothing matched.",
+        "items": all_items,
+    }
+    aggregated = _apply_criteria(aggregated, config)
+    aggregated["queries"] = queries
+    aggregated["pages_checked"] = pages_checked
+    aggregated["checked_at"] = dt_util.now().isoformat()
+    return aggregated
+
+
+class LlmWatchCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """Runs one watch (page or search subentry) on a schedule."""
+
+    def __init__(
+        self, hass: HomeAssistant, entry: ConfigEntry, subentry: ConfigSubentry
+    ) -> None:
         self.entry = entry
-        config = {**entry.data, **entry.options}
-        hours = config.get(CONF_SCAN_INTERVAL_HOURS, DEFAULT_SCAN_INTERVAL_HOURS)
+        self.subentry = subentry
+        hours = subentry.data.get(
+            CONF_SCAN_INTERVAL_HOURS, DEFAULT_SCAN_INTERVAL_HOURS
+        )
         super().__init__(
             hass,
             _LOGGER,
-            name=f"{DOMAIN} {config[CONF_NAME]}",
+            name=f"{DOMAIN} {subentry.data[CONF_NAME]}",
             update_interval=timedelta(hours=hours),
         )
 
     @property
     def config(self) -> dict[str, Any]:
-        """Merged config; options win so edits apply without re-adding."""
+        return dict(self.subentry.data)
+
+    @property
+    def hub(self) -> dict[str, Any]:
         return {**self.entry.data, **self.entry.options}
 
     @property
     def watch_name(self) -> str:
         return self.config[CONF_NAME]
 
+    @property
+    def is_search(self) -> bool:
+        return self.subentry.subentry_type == SUBENTRY_SEARCH_WATCH
+
     async def _async_update_data(self) -> dict[str, Any]:
-        session = async_get_clientsession(self.hass)
-        previously_found = bool((self.data or {}).get("found"))
+        previous = self.data or {}
+        previously_found = bool(previous.get("found"))
+        previous_best = best_price(previous.get("items") or [])
         try:
-            result = await run_check(session, self.config)
+            if self.is_search:
+                result = await run_search_check(self.hass, self.config, self.hub)
+            else:
+                result = await run_page_check(self.hass, self.config, self.hub)
         except UpdateFailed:
             raise
         except (TimeoutError, aiohttp.ClientError) as err:
-            raise UpdateFailed(f"Request failed: {err}") from err
+            raise UpdateFailed(f"Page fetch failed: {err}") from err
+        except HomeAssistantError as err:
+            raise UpdateFailed(f"AI task failed: {err}") from err
         except ValueError as err:
             raise UpdateFailed(str(err)) from err
 
+        event_base = {
+            "name": self.watch_name,
+            "summary": result["summary"],
+            "items": result["items"],
+        }
         if result["found"] and not previously_found:
+            self.hass.bus.async_fire(EVENT_FOUND, event_base)
+
+        new_best = best_price(result["items"])
+        if (
+            previous_best is not None
+            and new_best is not None
+            and new_best < previous_best
+        ):
             self.hass.bus.async_fire(
-                EVENT_FOUND,
-                {
-                    "name": self.watch_name,
-                    "url": self.config[CONF_URL],
-                    "summary": result["summary"],
-                    "items": result["items"],
-                },
+                EVENT_PRICE_DROP,
+                {**event_base, "old_price": previous_best, "new_price": new_best},
             )
         return result

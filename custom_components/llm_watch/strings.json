@@ -2,49 +2,138 @@
   "config": {
     "step": {
       "user": {
-        "title": "Add a watch",
-        "description": "Describe what you want in plain English. The watch fetches the page on a schedule, asks your local model whether it contains what you asked for, and turns a binary sensor on when it does.",
+        "title": "Set up LLM Watch",
+        "description": "One-time hub setup. Add individual watches afterwards from the integration page.",
         "data": {
-          "name": "Watch name",
-          "url": "Page URL to watch",
-          "prompt": "What are you looking for?",
-          "mode": "Page type",
-          "ollama_url": "Ollama server URL",
-          "model": "Ollama model",
-          "scan_interval_hours": "Check every (hours)",
-          "create_anyway": "Skip the test run and create anyway"
+          "searxng_url": "SearXNG URL",
+          "ai_task_entity": "Default AI Task entity"
         },
         "data_description": {
-          "url": "For JavaScript-heavy sites, use the site's JSON API endpoint instead of the page itself (find it in your browser's DevTools Network tab).",
-          "prompt": "For example: an air conditioning unit, portable or fixed, under £300."
+          "searxng_url": "Needed for web search watches (e.g. http://192.168.1.10:8888). SearXNG must have the JSON format enabled in its settings. Leave empty if you only want page watches.",
+          "ai_task_entity": "Used by watches that don't pick their own. Leave empty to use the preferred AI Task entity from Settings > Voice assistants."
         }
       },
-      "preview": {
-        "title": "Test run result",
-        "description": "The watch just ran once against the live page.\n\nFound: {found}\nSummary: {summary}\n\nItems:\n{items}\n\nSubmit to create the watch, or go back and adjust the description."
+      "reconfigure": {
+        "title": "Reconfigure LLM Watch",
+        "data": {
+          "searxng_url": "SearXNG URL",
+          "ai_task_entity": "Default AI Task entity"
+        }
       }
     },
-    "error": {
-      "cannot_connect": "Could not fetch the page or reach Ollama. Check both URLs.",
-      "no_content": "The page produced almost no text. It is probably rendered with JavaScript; point the watch at the site's JSON API instead, or tick 'create anyway'.",
-      "bad_model_reply": "The model did not return usable JSON. Try a different model, or tick 'create anyway'."
-    },
     "abort": {
-      "already_configured": "A watch with this URL and description already exists."
+      "already_configured": "LLM Watch is already set up. Add watches from the integration page.",
+      "reconfigure_successful": "Hub settings updated."
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Edit watch",
-        "data": {
-          "url": "Page URL to watch",
-          "prompt": "What are you looking for?",
-          "mode": "Page type",
-          "ollama_url": "Ollama server URL",
-          "model": "Ollama model",
-          "scan_interval_hours": "Check every (hours)"
+  "config_subentries": {
+    "page_watch": {
+      "entry_type": "Page watch",
+      "initiate_flow": {
+        "user": "Add page watch",
+        "reconfigure": "Edit page watch"
+      },
+      "step": {
+        "user": {
+          "title": "Add a page watch",
+          "description": "Watches one URL. Describe what you want in plain English; the watch fetches the page on a schedule and turns on when it finds it.",
+          "data": {
+            "name": "Watch name",
+            "url": "Page URL to watch",
+            "prompt": "What are you looking for?",
+            "mode": "Page type",
+            "require_in_stock": "Only count items that are in stock",
+            "max_price": "Maximum price",
+            "ai_task_entity": "AI Task entity (override)",
+            "scan_interval_hours": "Check every (hours)",
+            "create_anyway": "Skip the test run and create anyway"
+          },
+          "data_description": {
+            "url": "For JavaScript-heavy sites, use the site's JSON API endpoint instead (find it in your browser's DevTools Network tab).",
+            "prompt": "For example: an air conditioning unit, portable or fixed."
+          }
+        },
+        "preview": {
+          "title": "Test run result",
+          "description": "The watch just ran once.\n\nFound: {found}\nSummary: {summary}\n\nItems:\n{items}\n\nSubmit to create the watch, or go back and adjust."
+        },
+        "reconfigure": {
+          "title": "Edit page watch",
+          "data": {
+            "name": "Watch name",
+            "url": "Page URL to watch",
+            "prompt": "What are you looking for?",
+            "mode": "Page type",
+            "require_in_stock": "Only count items that are in stock",
+            "max_price": "Maximum price",
+            "ai_task_entity": "AI Task entity (override)",
+            "scan_interval_hours": "Check every (hours)",
+            "create_anyway": "(ignored when editing)"
+          }
         }
+      },
+      "error": {
+        "cannot_connect": "Could not fetch the page. Check the URL.",
+        "no_content": "The page produced almost no text. It is probably rendered with JavaScript; point the watch at the site's JSON API instead, or tick 'create anyway'.",
+        "ai_task_error": "The AI task failed. Check that an AI Task entity exists (add the AI Task sub-entry to your AI integration), and see the log for details.",
+        "bad_model_reply": "The model did not return usable data. Try a different model, or tick 'create anyway'."
+      },
+      "abort": {
+        "reconfigure_successful": "Watch updated."
+      }
+    },
+    "search_watch": {
+      "entry_type": "Web search watch",
+      "initiate_flow": {
+        "user": "Add web search watch",
+        "reconfigure": "Edit web search watch"
+      },
+      "step": {
+        "user": {
+          "title": "Add a web search watch",
+          "description": "No URL needed. On each run the AI writes search queries, SearXNG finds candidate pages, and the AI checks each one against your description. The test run can take a few minutes on a local model.",
+          "data": {
+            "name": "Watch name",
+            "prompt": "What are you looking for?",
+            "sites": "Restrict to these sites",
+            "require_in_stock": "Only count items that are in stock",
+            "max_price": "Maximum price",
+            "ai_task_entity": "AI Task entity (override)",
+            "scan_interval_hours": "Check every (hours)",
+            "create_anyway": "Skip the test run and create anyway"
+          },
+          "data_description": {
+            "prompt": "For example: a portable air conditioning unit, at least 9000 BTU, from a UK retailer.",
+            "sites": "Optional, comma separated (e.g. screwfix.com, argos.co.uk). Best for stock checks at specific retailers."
+          }
+        },
+        "preview": {
+          "title": "Test run result",
+          "description": "The watch just ran once.\n\nFound: {found}\nSummary: {summary}\n\nItems:\n{items}\n\nSubmit to create the watch, or go back and adjust."
+        },
+        "reconfigure": {
+          "title": "Edit web search watch",
+          "data": {
+            "name": "Watch name",
+            "prompt": "What are you looking for?",
+            "sites": "Restrict to these sites",
+            "require_in_stock": "Only count items that are in stock",
+            "max_price": "Maximum price",
+            "ai_task_entity": "AI Task entity (override)",
+            "scan_interval_hours": "Check every (hours)",
+            "create_anyway": "(ignored when editing)"
+          }
+        }
+      },
+      "error": {
+        "no_searxng": "No SearXNG URL is set on the hub. Reconfigure the LLM Watch integration first.",
+        "cannot_connect": "Could not reach SearXNG or fetch the result pages.",
+        "no_content": "The search returned nothing readable. Check SearXNG's URL and that its JSON format is enabled, or broaden the description.",
+        "ai_task_error": "The AI task failed. Check that an AI Task entity exists, and see the log for details.",
+        "bad_model_reply": "The model did not return usable data. Try a different model."
+      },
+      "abort": {
+        "reconfigure_successful": "Watch updated."
       }
     }
   },

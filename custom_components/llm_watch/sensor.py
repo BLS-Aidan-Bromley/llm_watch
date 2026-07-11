@@ -3,37 +3,45 @@
 from __future__ import annotations
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import LlmWatchCoordinator
+from .helpers import best_price
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    coordinator: LlmWatchCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [
-            LlmWatchMatchesSensor(coordinator, entry),
-            LlmWatchBestPriceSensor(coordinator, entry),
-        ]
-    )
+    coordinators = hass.data[DOMAIN][entry.entry_id]
+    for subentry in entry.subentries.values():
+        coordinator = coordinators.get(subentry.subentry_id)
+        if coordinator is None:
+            continue
+        async_add_entities(
+            [
+                LlmWatchMatchesSensor(coordinator, subentry),
+                LlmWatchBestPriceSensor(coordinator, subentry),
+            ],
+            config_subentry_id=subentry.subentry_id,
+        )
 
 
 class _Base(CoordinatorEntity[LlmWatchCoordinator], SensorEntity):
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator: LlmWatchCoordinator, entry: ConfigEntry) -> None:
+    def __init__(
+        self, coordinator: LlmWatchCoordinator, subentry: ConfigSubentry
+    ) -> None:
         super().__init__(coordinator)
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
+            identifiers={(DOMAIN, subentry.subentry_id)},
         )
 
     @property
@@ -50,9 +58,11 @@ class LlmWatchMatchesSensor(_Base):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:magnify"
 
-    def __init__(self, coordinator: LlmWatchCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_matches"
+    def __init__(
+        self, coordinator: LlmWatchCoordinator, subentry: ConfigSubentry
+    ) -> None:
+        super().__init__(coordinator, subentry)
+        self._attr_unique_id = f"{subentry.subentry_id}_matches"
 
     @property
     def native_value(self) -> int | None:
@@ -77,14 +87,15 @@ class LlmWatchBestPriceSensor(_Base):
     _attr_name = "Best price"
     _attr_icon = "mdi:currency-gbp"
 
-    def __init__(self, coordinator: LlmWatchCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_best_price"
+    def __init__(
+        self, coordinator: LlmWatchCoordinator, subentry: ConfigSubentry
+    ) -> None:
+        super().__init__(coordinator, subentry)
+        self._attr_unique_id = f"{subentry.subentry_id}_best_price"
 
     @property
     def native_value(self) -> float | None:
-        prices = [i["price"] for i in self._items if i.get("price") is not None]
-        return min(prices) if prices else None
+        return best_price(self._items)
 
     @property
     def extra_state_attributes(self) -> dict | None:
@@ -92,4 +103,4 @@ class LlmWatchBestPriceSensor(_Base):
         if not priced:
             return None
         cheapest = min(priced, key=lambda i: i["price"])
-        return {"item": cheapest["name"]}
+        return {"item": cheapest["name"], "source": cheapest.get("source")}

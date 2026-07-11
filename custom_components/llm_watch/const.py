@@ -2,32 +2,46 @@
 
 DOMAIN = "llm_watch"
 
+# Hub (config entry) fields
+CONF_SEARXNG_URL = "searxng_url"
+CONF_AI_TASK_ENTITY = "ai_task_entity"
+
+# Watch (subentry) fields
 CONF_NAME = "name"
 CONF_URL = "url"
 CONF_PROMPT = "prompt"
 CONF_MODE = "mode"
-CONF_OLLAMA_URL = "ollama_url"
-CONF_MODEL = "model"
+CONF_SITES = "sites"
+CONF_REQUIRE_IN_STOCK = "require_in_stock"
+CONF_MAX_PRICE = "max_price"
 CONF_SCAN_INTERVAL_HOURS = "scan_interval_hours"
 CONF_CREATE_ANYWAY = "create_anyway"
+
+SUBENTRY_PAGE_WATCH = "page_watch"
+SUBENTRY_SEARCH_WATCH = "search_watch"
 
 MODE_AUTO = "auto"
 MODE_HTML = "html"
 MODE_JSON = "json"
 MODES = [MODE_AUTO, MODE_HTML, MODE_JSON]
 
-DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_MODEL = "llama3.2"
 DEFAULT_SCAN_INTERVAL_HOURS = 6
 
 # Cleaned page text is truncated to this many characters before it is
 # sent to the model. Keeps prompts small enough for local 8B models.
 MAX_CONTENT_CHARS = 15000
 
+# Search watch limits: how many queries the model may propose, and how many
+# candidate pages are fetched and judged per run. Every page is one AI Task
+# call, so this bounds run time and token use.
+MAX_QUERIES = 3
+MAX_RESULTS_PER_QUERY = 3
+MAX_PAGES = 5
+
 FETCH_TIMEOUT = 30
-OLLAMA_TIMEOUT = 180
 
 EVENT_FOUND = f"{DOMAIN}_found"
+EVENT_PRICE_DROP = f"{DOMAIN}_price_drop"
 SERVICE_RUN_WATCH = "run_watch"
 ATTR_WATCH_NAME = "name"
 

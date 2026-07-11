@@ -1,4 +1,4 @@
-"""Config flow for LLM Watch."""
+"""Config flow for LLM Watch: hub entry plus watch subentries."""
 
 from __future__ import annotations
 
@@ -8,11 +8,17 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import callback
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.config_entries import (
+    ConfigFlow,
+    ConfigFlowResult,
+    ConfigSubentryFlow,
+    SubentryFlowResult,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -24,70 +30,188 @@ from homeassistant.helpers.selector import (
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import (
+    CONF_AI_TASK_ENTITY,
     CONF_CREATE_ANYWAY,
+    CONF_MAX_PRICE,
     CONF_MODE,
-    CONF_MODEL,
     CONF_NAME,
-    CONF_OLLAMA_URL,
     CONF_PROMPT,
+    CONF_REQUIRE_IN_STOCK,
     CONF_SCAN_INTERVAL_HOURS,
+    CONF_SEARXNG_URL,
+    CONF_SITES,
     CONF_URL,
-    DEFAULT_MODEL,
-    DEFAULT_OLLAMA_URL,
     DEFAULT_SCAN_INTERVAL_HOURS,
     DOMAIN,
     MODE_AUTO,
     MODES,
+    SUBENTRY_PAGE_WATCH,
+    SUBENTRY_SEARCH_WATCH,
 )
-from .coordinator import run_check
+from .coordinator import run_page_check, run_search_check
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _schema(defaults: dict[str, Any]) -> vol.Schema:
-    return vol.Schema(
-        {
-            vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, "")): str,
-            vol.Required(CONF_URL, default=defaults.get(CONF_URL, "")): TextSelector(
-                TextSelectorConfig(type="url")
-            ),
-            vol.Required(
-                CONF_PROMPT, default=defaults.get(CONF_PROMPT, "")
-            ): TextSelector(TextSelectorConfig(multiline=True)),
-            vol.Required(
-                CONF_MODE, default=defaults.get(CONF_MODE, MODE_AUTO)
-            ): SelectSelector(
-                SelectSelectorConfig(options=MODES, translation_key="mode")
-            ),
-            vol.Required(
-                CONF_OLLAMA_URL,
-                default=defaults.get(CONF_OLLAMA_URL, DEFAULT_OLLAMA_URL),
-            ): TextSelector(TextSelectorConfig(type="url")),
-            vol.Required(
-                CONF_MODEL, default=defaults.get(CONF_MODEL, DEFAULT_MODEL)
-            ): str,
-            vol.Required(
-                CONF_SCAN_INTERVAL_HOURS,
-                default=defaults.get(
-                    CONF_SCAN_INTERVAL_HOURS, DEFAULT_SCAN_INTERVAL_HOURS
-                ),
-            ): NumberSelector(
-                NumberSelectorConfig(
-                    min=1, max=168, step=1, mode=NumberSelectorMode.BOX,
-                    unit_of_measurement="hours",
-                )
-            ),
-            vol.Optional(
-                CONF_CREATE_ANYWAY, default=False
-            ): bool,
-        }
+def _optional(schema: dict, key: str, defaults: dict, sel: Any) -> None:
+    """Add an optional field, only defaulting when a value is stored."""
+    if defaults.get(key) not in (None, ""):
+        schema[vol.Optional(key, default=defaults[key])] = sel
+    else:
+        schema[vol.Optional(key)] = sel
+
+
+def _hub_schema(defaults: dict[str, Any]) -> vol.Schema:
+    schema: dict[Any, Any] = {}
+    _optional(
+        schema, CONF_SEARXNG_URL, defaults, TextSelector(TextSelectorConfig(type="url"))
     )
+    _optional(
+        schema,
+        CONF_AI_TASK_ENTITY,
+        defaults,
+        EntitySelector(EntitySelectorConfig(domain="ai_task")),
+    )
+    return vol.Schema(schema)
+
+
+def _watch_schema(kind: str, defaults: dict[str, Any]) -> vol.Schema:
+    schema: dict[Any, Any] = {
+        vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, "")): str,
+    }
+    if kind == SUBENTRY_PAGE_WATCH:
+        schema[vol.Required(CONF_URL, default=defaults.get(CONF_URL, ""))] = (
+            TextSelector(TextSelectorConfig(type="url"))
+        )
+    schema[vol.Required(CONF_PROMPT, default=defaults.get(CONF_PROMPT, ""))] = (
+        TextSelector(TextSelectorConfig(multiline=True))
+    )
+    if kind == SUBENTRY_PAGE_WATCH:
+        schema[
+            vol.Required(CONF_MODE, default=defaults.get(CONF_MODE, MODE_AUTO))
+        ] = SelectSelector(SelectSelectorConfig(options=MODES, translation_key="mode"))
+    else:
+        _optional(schema, CONF_SITES, defaults, TextSelector(TextSelectorConfig()))
+    schema[
+        vol.Required(
+            CONF_REQUIRE_IN_STOCK,
+            default=defaults.get(CONF_REQUIRE_IN_STOCK, False),
+        )
+    ] = bool
+    _optional(
+        schema,
+        CONF_MAX_PRICE,
+        defaults,
+        NumberSelector(
+            NumberSelectorConfig(min=0, step=0.01, mode=NumberSelectorMode.BOX)
+        ),
+    )
+    _optional(
+        schema,
+        CONF_AI_TASK_ENTITY,
+        defaults,
+        EntitySelector(EntitySelectorConfig(domain="ai_task")),
+    )
+    schema[
+        vol.Required(
+            CONF_SCAN_INTERVAL_HOURS,
+            default=defaults.get(CONF_SCAN_INTERVAL_HOURS, DEFAULT_SCAN_INTERVAL_HOURS),
+        )
+    ] = NumberSelector(
+        NumberSelectorConfig(
+            min=1, max=168, step=1, mode=NumberSelectorMode.BOX,
+            unit_of_measurement="hours",
+        )
+    )
+    schema[vol.Optional(CONF_CREATE_ANYWAY, default=False)] = bool
+    return vol.Schema(schema)
+
+
+def _normalise_watch_input(user_input: dict[str, Any]) -> bool:
+    """Coerce numbers and pop the test toggle. Returns create_anyway."""
+    user_input[CONF_SCAN_INTERVAL_HOURS] = int(user_input[CONF_SCAN_INTERVAL_HOURS])
+    if user_input.get(CONF_MAX_PRICE) is not None:
+        user_input[CONF_MAX_PRICE] = float(user_input[CONF_MAX_PRICE])
+    return bool(user_input.pop(CONF_CREATE_ANYWAY, False))
+
+
+async def _test_watch(
+    hass: HomeAssistant, kind: str, config: dict[str, Any], hub: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Run a watch once; return (preview, error_key)."""
+    try:
+        if kind == SUBENTRY_SEARCH_WATCH:
+            return await run_search_check(hass, config, hub), None
+        return await run_page_check(hass, config, hub), None
+    except (TimeoutError, aiohttp.ClientError) as err:
+        _LOGGER.warning("Test fetch failed: %s", err)
+        return None, "cannot_connect"
+    except UpdateFailed as err:
+        _LOGGER.warning("Test run failed: %s", err)
+        return None, "no_content"
+    except HomeAssistantError as err:
+        _LOGGER.warning("AI task failed: %s", err)
+        return None, "ai_task_error"
+    except ValueError as err:
+        _LOGGER.warning("Model reply unusable: %s", err)
+        return None, "bad_model_reply"
+
+
+def _preview_placeholders(preview: dict[str, Any]) -> dict[str, str]:
+    items = preview["items"]
+    item_lines = "\n".join(
+        f"- {i['name']}"
+        + (f" — {i['price']}" if i.get("price") is not None else "")
+        + (f" ({i['availability']})" if i.get("availability") else "")
+        + (f" [{i['source']}]" if i.get("source") else "")
+        for i in items[:10]
+    )
+    return {
+        "found": "yes" if preview["found"] else "no",
+        "summary": preview["summary"] or "(none)",
+        "items": item_lines or "(none)",
+    }
 
 
 class LlmWatchConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Create a watch: collect config, run a live test, show a preview."""
+    """Create the hub. Watches are added as subentries."""
 
-    VERSION = 1
+    VERSION = 2
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        await self.async_set_unique_id(DOMAIN)
+        self._abort_if_unique_id_configured()
+        if user_input is not None:
+            return self.async_create_entry(title="LLM Watch", data=user_input)
+        return self.async_show_form(step_id="user", data_schema=_hub_schema({}))
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        entry = self._get_reconfigure_entry()
+        if user_input is not None:
+            return self.async_update_reload_and_abort(entry, data=user_input)
+        return self.async_show_form(
+            step_id="reconfigure", data_schema=_hub_schema(dict(entry.data))
+        )
+
+    @classmethod
+    @callback
+    def async_get_supported_subentry_types(
+        cls, config_entry
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        return {
+            SUBENTRY_PAGE_WATCH: PageWatchSubentryFlow,
+            SUBENTRY_SEARCH_WATCH: SearchWatchSubentryFlow,
+        }
+
+
+class _WatchSubentryFlow(ConfigSubentryFlow):
+    """Shared add/reconfigure flow for both watch types."""
+
+    kind: str
 
     def __init__(self) -> None:
         self._pending: dict[str, Any] | None = None
@@ -95,98 +219,67 @@ class LlmWatchConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> SubentryFlowResult:
         errors: dict[str, str] = {}
+        hub = dict(self._get_entry().data)
         if user_input is not None:
-            user_input[CONF_SCAN_INTERVAL_HOURS] = int(
-                user_input[CONF_SCAN_INTERVAL_HOURS]
-            )
-            create_anyway = user_input.pop(CONF_CREATE_ANYWAY, False)
-            await self.async_set_unique_id(
-                f"{user_input[CONF_URL]}::{user_input[CONF_PROMPT]}"[:255]
-            )
-            self._abort_if_unique_id_configured()
-
-            if create_anyway:
+            create_anyway = _normalise_watch_input(user_input)
+            if self.kind == SUBENTRY_SEARCH_WATCH and not hub.get(CONF_SEARXNG_URL):
+                errors["base"] = "no_searxng"
+            elif create_anyway:
                 return self.async_create_entry(
                     title=user_input[CONF_NAME], data=user_input
                 )
-
-            session = async_get_clientsession(self.hass)
-            try:
-                self._preview = await run_check(session, user_input)
-            except (TimeoutError, aiohttp.ClientError) as err:
-                _LOGGER.warning("Test fetch failed: %s", err)
-                errors["base"] = "cannot_connect"
-            except UpdateFailed as err:
-                _LOGGER.warning("Test run failed: %s", err)
-                errors["base"] = "no_content"
-            except ValueError as err:
-                _LOGGER.warning("Model reply unusable: %s", err)
-                errors["base"] = "bad_model_reply"
             else:
-                self._pending = user_input
-                return await self.async_step_preview()
-
+                self._preview, error = await _test_watch(
+                    self.hass, self.kind, user_input, hub
+                )
+                if error:
+                    errors["base"] = error
+                else:
+                    self._pending = user_input
+                    return await self.async_step_preview()
         return self.async_show_form(
             step_id="user",
-            data_schema=_schema(user_input or {}),
+            data_schema=_watch_schema(self.kind, user_input or {}),
             errors=errors,
         )
 
     async def async_step_preview(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> SubentryFlowResult:
         assert self._pending is not None and self._preview is not None
         if user_input is not None:
             return self.async_create_entry(
                 title=self._pending[CONF_NAME], data=self._pending
             )
-
-        items = self._preview["items"]
-        item_lines = "\n".join(
-            f"- {i['name']}"
-            + (f" — {i['price']}" if i.get("price") is not None else "")
-            + (f" ({i['availability']})" if i.get("availability") else "")
-            for i in items[:10]
-        )
         return self.async_show_form(
             step_id="preview",
             data_schema=vol.Schema({}),
-            description_placeholders={
-                "found": "yes" if self._preview["found"] else "no",
-                "summary": self._preview["summary"] or "(none)",
-                "items": item_lines or "(none)",
-            },
+            description_placeholders=_preview_placeholders(self._preview),
         )
 
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> LlmWatchOptionsFlow:
-        return LlmWatchOptionsFlow()
-
-
-class LlmWatchOptionsFlow(OptionsFlow):
-    """Edit an existing watch without re-adding it."""
-
-    async def async_step_init(
+    async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    ) -> SubentryFlowResult:
+        subentry = self._get_reconfigure_subentry()
         if user_input is not None:
-            user_input[CONF_SCAN_INTERVAL_HOURS] = int(
-                user_input[CONF_SCAN_INTERVAL_HOURS]
+            _normalise_watch_input(user_input)
+            return self.async_update_and_abort(
+                self._get_entry(),
+                subentry,
+                title=user_input[CONF_NAME],
+                data=user_input,
             )
-            user_input.pop(CONF_CREATE_ANYWAY, None)
-            return self.async_create_entry(title="", data=user_input)
-
-        current = {**self.config_entry.data, **self.config_entry.options}
-        schema = _schema(current)
-        # Name is fixed after creation; drop it and the test toggle.
-        schema = vol.Schema(
-            {
-                key: val
-                for key, val in schema.schema.items()
-                if getattr(key, "schema", None) not in (CONF_NAME, CONF_CREATE_ANYWAY)
-            }
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=_watch_schema(self.kind, dict(subentry.data)),
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+
+
+class PageWatchSubentryFlow(_WatchSubentryFlow):
+    kind = SUBENTRY_PAGE_WATCH
+
+
+class SearchWatchSubentryFlow(_WatchSubentryFlow):
+    kind = SUBENTRY_SEARCH_WATCH

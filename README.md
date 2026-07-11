@@ -1,76 +1,71 @@
 # LLM Watch
 
-Watch any web page for something you describe in plain English, using a local
-LLM (Ollama). No CSS selectors, no scrape configs.
+Tell Home Assistant what you're after, in plain English, and it hunts the web
+for it on a schedule: deals, promotions, specific products, stock. Uses
+whatever AI you already have in Home Assistant (via AI Tasks) and, for web
+searches, your own SearXNG instance. No CSS selectors, no scrape configs.
 
-Each watch fetches a URL on a schedule, strips the page to readable text,
-and asks your local model one question: does this page contain what the user
-asked for? You get:
+## Two kinds of watch
 
-- `binary_sensor.<watch>_found` — on when it does, with the matched items,
-  a summary and prices as attributes
-- `sensor.<watch>_matches` — how many matching items were found
-- `sensor.<watch>_best_price` — lowest price among the matches
-- an `llm_watch_found` event fired the moment a watch flips from
-  not-found to found
-- an `llm_watch.run_watch` service so automations can trigger checks on demand
+**Page watch** — watches one URL. "Is there a portable air conditioning unit
+on this page?"
+
+**Web search watch** — no URL. Each run, the AI writes search queries from
+your description, SearXNG finds candidate pages, each page is fetched and
+judged by the AI against your description, and the results are merged. Optional
+criteria: only count items that are in stock, and a maximum price. Optionally
+restrict the search to specific retail sites, which is the reliable way to do
+stock checks.
+
+Every watch gives you:
+
+- `binary_sensor.<watch>_found` — on when the criteria are met, with items,
+  prices, sources, and a summary as attributes
+- `sensor.<watch>_matches` and `sensor.<watch>_best_price`
+- `llm_watch_found` event when a watch flips from not-found to found
+- `llm_watch_price_drop` event when the best price falls between checks
+  (with old_price and new_price)
+- `llm_watch.run_watch` service to trigger checks from automations
 
 ## Requirements
 
-- Home Assistant 2024.11 or newer
-- An [Ollama](https://ollama.com) server reachable from Home Assistant with a
-  model pulled that supports structured output (anything recent: `llama3.2`,
-  `llama3.1:8b`, `qwen2.5`, `mistral`)
+- Home Assistant 2025.9 or newer
+- Any AI integration with an **AI Task** entity (Ollama, OpenAI, Anthropic,
+  Google, OpenRouter, ...). Add the "AI Task" sub-entry in your AI
+  integration if you haven't already.
+- For web search watches: a [SearXNG](https://docs.searxng.org) instance with
+  the JSON format enabled — in `settings.yml`:
+
+```yaml
+search:
+  formats:
+    - html
+    - json
+```
 
 ## Install
 
-1. HACS → three-dot menu → Custom repositories → add `BLS-Aidan-Bromley/llm_watch`,
+1. HACS → Custom repositories → add `BLS-Aidan-Bromley/llm_watch`,
    category **Integration**
-2. Install **LLM Watch**, restart Home Assistant
+2. Install, restart Home Assistant
 3. Settings → Devices & services → Add integration → **LLM Watch**
+4. Hub setup: SearXNG URL (optional) and a default AI Task entity (optional)
+5. On the integration page, use **Add page watch** / **Add web search watch**
 
-## Adding a watch
-
-You give it a name, a URL, and a description of what you want, e.g.
-
-> an air conditioning unit, portable or fixed, under £300
-
-Pick the page type (auto-detect is fine), point it at your Ollama server,
-choose a model and how often to check. Before the watch is created it runs
-once against the live page and shows you what it found, so you can tune the
-description until the model understands you.
-
-Editing a watch later: Settings → Devices & services → LLM Watch →
-Configure.
-
-## JavaScript-heavy sites (Lidl, most supermarkets)
-
-A plain fetch of `lidl.co.uk` returns a near-empty JavaScript shell, so
-there is nothing for the model to read. The fix: watch the site's JSON API
-instead of the page.
-
-1. Open the site in your browser, open DevTools → Network tab
-2. Search for your product on the site
-3. Look for the request that returned the results as JSON, copy its URL
-4. Use that URL for the watch and set page type to **JSON API**
-
-JSON is also cheaper for the model to read and more stable over time than
-scraped HTML. Note Lidl does not publish per-store live stock; you can watch
-online availability and the weekly offers, not shelf stock at your local
-branch.
+Each watch runs a live test before it's created and shows you what it found,
+so you can tune the description. A web search test run makes several AI calls
+and can take a few minutes on a local model.
 
 ## Example automations
 
-Notify when a watch finds something:
-
 ```yaml
 automation:
-  - alias: "Air con spotted at Lidl"
+  - alias: "Air con found in stock"
     trigger:
       - platform: event
         event_type: llm_watch_found
         event_data:
-          name: "Lidl air con"
+          name: "Air con hunt"
     action:
       - service: notify.mobile_app_your_phone
         data:
@@ -78,46 +73,40 @@ automation:
           message: >-
             {{ trigger.event.data.summary }}
             {% for item in trigger.event.data.items %}
-            • {{ item.name }}{% if item.price %} — £{{ item.price }}{% endif %}
+            • {{ item.name }}{% if item.price %} — £{{ item.price }}{% endif %} ({{ item.source }})
             {% endfor %}
-```
 
-Run a watch at a specific time instead of (or as well as) its interval:
-
-```yaml
-automation:
-  - alias: "Morning offer check"
+  - alias: "Price dropped"
     trigger:
-      - platform: time
-        at: "07:30:00"
+      - platform: event
+        event_type: llm_watch_price_drop
     action:
-      - service: llm_watch.run_watch
+      - service: notify.mobile_app_your_phone
         data:
-          name: "Lidl air con"
+          message: >-
+            {{ trigger.event.data.name }}: price down from
+            £{{ trigger.event.data.old_price }} to £{{ trigger.event.data.new_price }}
 ```
 
-Omit `name` to run every watch at once.
+Run a watch at a set time: call `llm_watch.run_watch` with the watch name
+(or no name for all watches) from any automation.
 
-## How it works
+## Upgrading from 0.2
 
-1. Fetch the URL (30s timeout, desktop browser user agent)
-2. HTML: strip scripts, styles and boilerplate tags, collapse to plain text,
-   truncate to 15k characters. JSON: re-indent and truncate.
-3. Send the text to Ollama `/api/chat` with a JSON schema enforced via the
-   `format` parameter and temperature 0
-4. Parse the reply into `found` / `summary` / `items[{name, price,
-   availability, detail}]`
-5. Fire the `llm_watch_found` event on a false→true transition
-
-If a check fails (site down, Ollama unreachable, model returned rubbish) the
-entities go unavailable and the previous state is kept for the found event
-comparison; the error appears in the Home Assistant log.
+The 0.2 single-watch entry is migrated automatically into the new hub layout
+with your watch attached as a page watch. Add the SearXNG URL by
+reconfiguring the hub if you want search watches.
 
 ## Honest limitations
 
-- The model judges the page every run, so results are only as good as the
-  model and your description. The pre-create test run is there to tune it.
-- Pages rendered entirely client-side cannot be read; use the JSON API route.
-- Sites behind aggressive bot protection (Cloudflare challenges) will 403.
-- 15k characters of page text means very long listing pages get truncated;
-  prefer search-result URLs over category pages.
+- Results are judgements by your model on page text; the pre-create test run
+  is there to tune the description. Smaller local models are more literal.
+- JavaScript-only pages can't be read. Page watches should use the site's
+  JSON API for those; search watches skip unreadable pages automatically.
+- Sites behind aggressive bot protection will fail to fetch.
+- Per-store stock only works where the retailer publishes it; restrict a
+  search watch to those retailers' sites for reliable stock checks.
+- Price-drop comparison is against the previous check, held in memory; a
+  Home Assistant restart re-baselines it.
+- Search watches make 1 + (pages checked, max 5) AI calls per run. On a
+  local 8B model expect a run to take a minute or two; schedule accordingly.
