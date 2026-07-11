@@ -1,0 +1,13 @@
+run_watch:
+  name: Run watch
+  description: >-
+    Run a watch now instead of waiting for its schedule. Omit the name to run
+    every watch.
+  fields:
+    name:
+      name: Watch name
+      description: The name the watch was given when it was added.
+      required: false
+      example: "Lidl air con"
+      selector:
+        text:

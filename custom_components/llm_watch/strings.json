@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a watch",
+        "description": "Describe what you want in plain English. The watch fetches the page on a schedule, asks your local model whether it contains what you asked for, and turns a binary sensor on when it does.",
+        "data": {
+          "name": "Watch name",
+          "url": "Page URL to watch",
+          "prompt": "What are you looking for?",
+          "mode": "Page type",
+          "ollama_url": "Ollama server URL",
+          "model": "Ollama model",
+          "scan_interval_hours": "Check every (hours)",
+          "create_anyway": "Skip the test run and create anyway"
+        },
+        "data_description": {
+          "url": "For JavaScript-heavy sites, use the site's JSON API endpoint instead of the page itself (find it in your browser's DevTools Network tab).",
+          "prompt": "For example: an air conditioning unit, portable or fixed, under £300."
+        }
+      },
+      "preview": {
+        "title": "Test run result",
+        "description": "The watch just ran once against the live page.\n\nFound: {found}\nSummary: {summary}\n\nItems:\n{items}\n\nSubmit to create the watch, or go back and adjust the description."
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not fetch the page or reach Ollama. Check both URLs.",
+      "no_content": "The page produced almost no text. It is probably rendered with JavaScript; point the watch at the site's JSON API instead, or tick 'create anyway'.",
+      "bad_model_reply": "The model did not return usable JSON. Try a different model, or tick 'create anyway'."
+    },
+    "abort": {
+      "already_configured": "A watch with this URL and description already exists."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Edit watch",
+        "data": {
+          "url": "Page URL to watch",
+          "prompt": "What are you looking for?",
+          "mode": "Page type",
+          "ollama_url": "Ollama server URL",
+          "model": "Ollama model",
+          "scan_interval_hours": "Check every (hours)"
+        }
+      }
+    }
+  },
+  "selector": {
+    "mode": {
+      "options": {
+        "auto": "Auto-detect",
+        "html": "HTML page",
+        "json": "JSON API"
+      }
+    }
+  }
+}
