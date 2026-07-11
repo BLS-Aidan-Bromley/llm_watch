@@ -20,14 +20,15 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    MAX_CONTENT_CHARS,
     CONF_AI_TASK_ENTITY,
+    CONF_BACKEND,
     CONF_MAX_PRICE,
     CONF_MODE,
     CONF_NAME,
     CONF_PROMPT,
     CONF_REQUIRE_IN_STOCK,
     CONF_SCAN_INTERVAL_HOURS,
-    CONF_SEARXNG_URL,
     CONF_SITES,
     CONF_URL,
     DEFAULT_SCAN_INTERVAL_HOURS,
@@ -52,7 +53,7 @@ from .helpers import (
     parse_queries,
     parse_result,
 )
-from .search import gather_candidates
+from .search import backend_ready, gather_candidates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -202,11 +203,11 @@ async def run_search_check(
     hass: HomeAssistant, config: dict[str, Any], hub: dict[str, Any]
 ) -> dict[str, Any]:
     """Check a search watch: queries -> SearXNG -> pages -> extraction."""
-    searxng_url = hub.get(CONF_SEARXNG_URL)
-    if not searxng_url:
+    if backend_ready(hub) is None:
         raise UpdateFailed(
-            "No SearXNG URL configured on the LLM Watch hub; search watches "
-            "need one. Reconfigure the integration."
+            "The search backend on the LLM Watch hub is not configured "
+            "(pick a backend and fill in its URL or API key). Reconfigure "
+            "the integration."
         )
     session = async_get_clientsession(hass)
     entity_id = config.get(CONF_AI_TASK_ENTITY) or hub.get(CONF_AI_TASK_ENTITY)
@@ -226,20 +227,25 @@ async def run_search_check(
         queries = [prompt[:100]]
 
     candidates = await gather_candidates(
-        session, searxng_url, queries, config.get(CONF_SITES), MAX_PAGES
+        session, hub, queries, config.get(CONF_SITES), MAX_PAGES
     )
     if not candidates:
         raise UpdateFailed(
-            "SearXNG returned no results. Check the SearXNG URL, that its "
-            "JSON format is enabled, and that the description is searchable."
+            "The search returned no results. Check the backend settings on "
+            "the hub (URL / API key) and that the description is searchable."
         )
 
     all_items: list[dict[str, Any]] = []
     summaries: list[str] = []
     pages_checked = 0
-    for url in candidates:
+    for cand in candidates:
+        url = cand["url"]
         try:
-            page_text = await fetch_page_text(session, url)
+            if cand.get("content") and len(cand["content"].strip()) >= 50:
+                # Backend supplied extracted content (Tavily): no fetch needed.
+                page_text = cand["content"][:MAX_CONTENT_CHARS]
+            else:
+                page_text = await fetch_page_text(session, url)
             result = await _extract(hass, name, entity_id, prompt, url, page_text)
         except (TimeoutError, aiohttp.ClientError, UpdateFailed, ValueError) as err:
             _LOGGER.debug("Skipping candidate %s: %s", url, err)
@@ -273,10 +279,17 @@ class LlmWatchCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Runs one watch (page or search subentry) on a schedule."""
 
     def __init__(
-        self, hass: HomeAssistant, entry: ConfigEntry, subentry: ConfigSubentry
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        subentry: ConfigSubentry,
+        seed: dict[str, Any] | None = None,
+        on_result=None,
     ) -> None:
         self.entry = entry
         self.subentry = subentry
+        self._seed = seed or {}
+        self._on_result = on_result
         hours = subentry.data.get(
             CONF_SCAN_INTERVAL_HOURS, DEFAULT_SCAN_INTERVAL_HOURS
         )
@@ -304,7 +317,9 @@ class LlmWatchCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self.subentry.subentry_type == SUBENTRY_SEARCH_WATCH
 
     async def _async_update_data(self) -> dict[str, Any]:
-        previous = self.data or {}
+        # After a restart self.data is empty; the persisted seed keeps the
+        # found/price baseline so events don't misfire or get lost.
+        previous = self.data or self._seed or {}
         previously_found = bool(previous.get("found"))
         previous_best = best_price(previous.get("items") or [])
         try:
@@ -339,4 +354,6 @@ class LlmWatchCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 EVENT_PRICE_DROP,
                 {**event_base, "old_price": previous_best, "new_price": new_best},
             )
+        if self._on_result is not None:
+            await self._on_result(self.subentry.subentry_id, result)
         return result

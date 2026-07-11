@@ -26,6 +26,7 @@ Every watch gives you:
 - `llm_watch_price_drop` event when the best price falls between checks
   (with old_price and new_price)
 - `llm_watch.run_watch` service to trigger checks from automations
+- a **Check now** button on every watch
 
 ## Requirements
 
@@ -33,8 +34,16 @@ Every watch gives you:
 - Any AI integration with an **AI Task** entity (Ollama, OpenAI, Anthropic,
   Google, OpenRouter, ...). Add the "AI Task" sub-entry in your AI
   integration if you haven't already.
-- For web search watches: a [SearXNG](https://docs.searxng.org) instance with
-  the JSON format enabled — in `settings.yml`:
+- For web search watches, one search backend, chosen at hub setup:
+
+**Tavily** (recommended). Sign up free at [tavily.com](https://tavily.com),
+copy the API key (`tvly-...`). 1,000 free searches a month, no card needed;
+a watch run uses up to 3. Tavily also extracts page content in the search
+itself, so these watches skip page fetching entirely, which avoids retailer
+bot-blocking and is faster.
+
+**SearXNG** (fully local, unlimited). Self-hosted; enable the JSON format
+in `settings.yml`:
 
 ```yaml
 search:
@@ -43,13 +52,18 @@ search:
     - json
 ```
 
+**Brave Search API**. Get a key at
+[brave.com/search/api](https://brave.com/search/api) (free tier available).
+Independent index; returns results only, so pages are fetched separately.
+
 ## Install
 
 1. HACS → Custom repositories → add `BLS-Aidan-Bromley/llm_watch`,
    category **Integration**
 2. Install, restart Home Assistant
 3. Settings → Devices & services → Add integration → **LLM Watch**
-4. Hub setup: SearXNG URL (optional) and a default AI Task entity (optional)
+4. Hub setup: pick a search backend, enter its API key or URL, and
+   optionally set a default AI Task entity
 5. On the integration page, use **Add page watch** / **Add web search watch**
 
 Each watch runs a live test before it's created and shows you what it found,
@@ -94,7 +108,7 @@ Run a watch at a set time: call `llm_watch.run_watch` with the watch name
 ## Upgrading from 0.2
 
 The 0.2 single-watch entry is migrated automatically into the new hub layout
-with your watch attached as a page watch. Add the SearXNG URL by
+with your watch attached as a page watch. Pick a search backend by
 reconfiguring the hub if you want search watches.
 
 ## Honest limitations
@@ -106,7 +120,7 @@ reconfiguring the hub if you want search watches.
 - Sites behind aggressive bot protection will fail to fetch.
 - Per-store stock only works where the retailer publishes it; restrict a
   search watch to those retailers' sites for reliable stock checks.
-- Price-drop comparison is against the previous check, held in memory; a
-  Home Assistant restart re-baselines it.
+- Price-drop comparison is against the previous check and survives Home
+  Assistant restarts (the baseline is persisted to storage).
 - Search watches make 1 + (pages checked, max 5) AI calls per run. On a
   local 8B model expect a run to take a minute or two; schedule accordingly.

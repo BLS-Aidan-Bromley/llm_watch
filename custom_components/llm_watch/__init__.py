@@ -9,10 +9,14 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers.storage import Store
 
 from .const import (
     ATTR_WATCH_NAME,
+    BACKEND_SEARXNG,
     CONF_AI_TASK_ENTITY,
+    CONF_BACKEND,
+    CONF_SEARXNG_URL,
     CONF_URL,
     DOMAIN,
     PLATFORMS,
@@ -20,6 +24,9 @@ from .const import (
     SUBENTRY_PAGE_WATCH,
 )
 from .coordinator import LlmWatchCoordinator
+from .helpers import best_price
+
+STORAGE_VERSION = 1
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,9 +35,33 @@ RUN_WATCH_SCHEMA = vol.Schema({vol.Optional(ATTR_WATCH_NAME): str})
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the hub and one coordinator per watch subentry."""
+    # Persisted found/best-price baseline so the price-drop comparison
+    # survives Home Assistant restarts.
+    store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
+    persisted: dict = await store.async_load() or {}
+
+    async def _save_result(subentry_id: str, result: dict) -> None:
+        persisted[subentry_id] = {
+            "found": result.get("found"),
+            "items": [
+                {"price": p}
+                for p in [
+                    i.get("price") for i in result.get("items") or []
+                ]
+                if p is not None
+            ],
+        }
+        await store.async_save(persisted)
+
     coordinators: dict[str, LlmWatchCoordinator] = {}
     for subentry in entry.subentries.values():
-        coordinator = LlmWatchCoordinator(hass, entry, subentry)
+        coordinator = LlmWatchCoordinator(
+            hass,
+            entry,
+            subentry,
+            seed=persisted.get(subentry.subentry_id),
+            on_result=_save_result,
+        )
         # A failing watch must not block the whole hub; entities show
         # unavailable and the coordinator retries on its schedule.
         await coordinator.async_refresh()
@@ -89,6 +120,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hub_data = {}
         if old.get(CONF_AI_TASK_ENTITY):
             hub_data[CONF_AI_TASK_ENTITY] = old[CONF_AI_TASK_ENTITY]
+        if old.get(CONF_SEARXNG_URL):
+            hub_data[CONF_SEARXNG_URL] = old[CONF_SEARXNG_URL]
+            hub_data[CONF_BACKEND] = BACKEND_SEARXNG
         hass.config_entries.async_update_entry(
             entry,
             title="LLM Watch",

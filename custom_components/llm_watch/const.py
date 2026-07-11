@@ -3,8 +3,16 @@
 DOMAIN = "llm_watch"
 
 # Hub (config entry) fields
+CONF_BACKEND = "backend"
 CONF_SEARXNG_URL = "searxng_url"
+CONF_TAVILY_API_KEY = "tavily_api_key"
+CONF_BRAVE_API_KEY = "brave_api_key"
 CONF_AI_TASK_ENTITY = "ai_task_entity"
+
+BACKEND_SEARXNG = "searxng"
+BACKEND_TAVILY = "tavily"
+BACKEND_BRAVE = "brave"
+BACKENDS = [BACKEND_TAVILY, BACKEND_SEARXNG, BACKEND_BRAVE]
 
 # Watch (subentry) fields
 CONF_NAME = "name"
@@ -45,4 +53,4 @@ EVENT_PRICE_DROP = f"{DOMAIN}_price_drop"
 SERVICE_RUN_WATCH = "run_watch"
 ATTR_WATCH_NAME = "name"
 
-PLATFORMS = ["binary_sensor", "sensor"]
+PLATFORMS = ["binary_sensor", "button", "sensor"]

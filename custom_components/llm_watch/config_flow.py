@@ -30,7 +30,11 @@ from homeassistant.helpers.selector import (
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import (
+    BACKENDS,
     CONF_AI_TASK_ENTITY,
+    CONF_BACKEND,
+    CONF_BRAVE_API_KEY,
+    CONF_TAVILY_API_KEY,
     CONF_CREATE_ANYWAY,
     CONF_MAX_PRICE,
     CONF_MODE,
@@ -49,6 +53,7 @@ from .const import (
     SUBENTRY_SEARCH_WATCH,
 )
 from .coordinator import run_page_check, run_search_check
+from .search import backend_ready
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -62,9 +67,27 @@ def _optional(schema: dict, key: str, defaults: dict, sel: Any) -> None:
 
 
 def _hub_schema(defaults: dict[str, Any]) -> vol.Schema:
-    schema: dict[Any, Any] = {}
+    schema: dict[Any, Any] = {
+        vol.Required(
+            CONF_BACKEND, default=defaults.get(CONF_BACKEND, BACKENDS[0])
+        ): SelectSelector(
+            SelectSelectorConfig(options=BACKENDS, translation_key="backend")
+        ),
+    }
+    _optional(
+        schema,
+        CONF_TAVILY_API_KEY,
+        defaults,
+        TextSelector(TextSelectorConfig(type="password")),
+    )
     _optional(
         schema, CONF_SEARXNG_URL, defaults, TextSelector(TextSelectorConfig(type="url"))
+    )
+    _optional(
+        schema,
+        CONF_BRAVE_API_KEY,
+        defaults,
+        TextSelector(TextSelectorConfig(type="password")),
     )
     _optional(
         schema,
@@ -73,6 +96,21 @@ def _hub_schema(defaults: dict[str, Any]) -> vol.Schema:
         EntitySelector(EntitySelectorConfig(domain="ai_task")),
     )
     return vol.Schema(schema)
+
+
+_BACKEND_FIELD = {
+    "searxng": CONF_SEARXNG_URL,
+    "tavily": CONF_TAVILY_API_KEY,
+    "brave": CONF_BRAVE_API_KEY,
+}
+
+
+def _hub_errors(user_input: dict[str, Any]) -> dict[str, str]:
+    """The chosen backend's field must be filled in."""
+    field = _BACKEND_FIELD[user_input[CONF_BACKEND]]
+    if not user_input.get(field):
+        return {"base": f"missing_{field}"}
+    return {}
 
 
 def _watch_schema(kind: str, defaults: dict[str, Any]) -> vol.Schema:
@@ -183,18 +221,30 @@ class LlmWatchConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(title="LLM Watch", data=user_input)
-        return self.async_show_form(step_id="user", data_schema=_hub_schema({}))
+            errors = _hub_errors(user_input)
+            if not errors:
+                return self.async_create_entry(title="LLM Watch", data=user_input)
+        return self.async_show_form(
+            step_id="user",
+            data_schema=_hub_schema(user_input or {}),
+            errors=errors,
+        )
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_update_reload_and_abort(entry, data=user_input)
+            errors = _hub_errors(user_input)
+            if not errors:
+                return self.async_update_reload_and_abort(entry, data=user_input)
         return self.async_show_form(
-            step_id="reconfigure", data_schema=_hub_schema(dict(entry.data))
+            step_id="reconfigure",
+            data_schema=_hub_schema(user_input or dict(entry.data)),
+            errors=errors,
         )
 
     @classmethod
@@ -224,8 +274,8 @@ class _WatchSubentryFlow(ConfigSubentryFlow):
         hub = dict(self._get_entry().data)
         if user_input is not None:
             create_anyway = _normalise_watch_input(user_input)
-            if self.kind == SUBENTRY_SEARCH_WATCH and not hub.get(CONF_SEARXNG_URL):
-                errors["base"] = "no_searxng"
+            if self.kind == SUBENTRY_SEARCH_WATCH and backend_ready(hub) is None:
+                errors["base"] = "no_backend"
             elif create_anyway:
                 return self.async_create_entry(
                     title=user_input[CONF_NAME], data=user_input

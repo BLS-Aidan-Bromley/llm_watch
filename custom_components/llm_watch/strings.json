@@ -3,27 +3,44 @@
     "step": {
       "user": {
         "title": "Set up LLM Watch",
-        "description": "One-time hub setup. Add individual watches afterwards from the integration page.",
+        "description": "One-time hub setup: pick a search backend and set your default AI. Add individual watches afterwards from the integration page.\n\nBackend setup:\n- **Tavily** (recommended): create a free account at tavily.com, copy the API key (tvly-...). 1,000 free searches a month, and it extracts page content for you, which avoids retailer bot-blocking.\n- **SearXNG** (fully local): your own instance URL. Enable the JSON format in settings.yml under search: formats: [html, json].\n- **Brave Search**: get an API key at brave.com/search/api (free tier available). Results only; pages are fetched separately.",
         "data": {
+          "backend": "Search backend",
+          "tavily_api_key": "Tavily API key",
           "searxng_url": "SearXNG URL",
+          "brave_api_key": "Brave Search API key",
           "ai_task_entity": "Default AI Task entity"
         },
         "data_description": {
-          "searxng_url": "Needed for web search watches (e.g. http://192.168.1.10:8888). SearXNG must have the JSON format enabled in its settings. Leave empty if you only want page watches.",
+          "backend": "Only used by web search watches; page watches work regardless.",
+          "searxng_url": "e.g. http://192.168.1.10:8888",
           "ai_task_entity": "Used by watches that don't pick their own. Leave empty to use the preferred AI Task entity from Settings > Voice assistants."
         }
       },
       "reconfigure": {
         "title": "Reconfigure LLM Watch",
         "data": {
+          "backend": "Search backend",
+          "tavily_api_key": "Tavily API key",
           "searxng_url": "SearXNG URL",
+          "brave_api_key": "Brave Search API key",
           "ai_task_entity": "Default AI Task entity"
+        },
+        "data_description": {
+          "backend": "Only used by web search watches; page watches work regardless.",
+          "searxng_url": "e.g. http://192.168.1.10:8888",
+          "ai_task_entity": "Used by watches that don't pick their own. Leave empty to use the preferred AI Task entity from Settings > Voice assistants."
         }
       }
     },
     "abort": {
       "already_configured": "LLM Watch is already set up. Add watches from the integration page.",
       "reconfigure_successful": "Hub settings updated."
+    },
+    "error": {
+      "missing_tavily_api_key": "Tavily is selected but no API key was entered.",
+      "missing_searxng_url": "SearXNG is selected but no URL was entered.",
+      "missing_brave_api_key": "Brave Search is selected but no API key was entered."
     }
   },
   "config_subentries": {
@@ -91,7 +108,7 @@
       "step": {
         "user": {
           "title": "Add a web search watch",
-          "description": "No URL needed. On each run the AI writes search queries, SearXNG finds candidate pages, and the AI checks each one against your description. The test run can take a few minutes on a local model.",
+          "description": "No URL needed. On each run the AI writes search queries, your search backend finds candidate pages, and the AI checks each one against your description. The test run can take a few minutes on a local model.",
           "data": {
             "name": "Watch name",
             "prompt": "What are you looking for?",
@@ -126,11 +143,11 @@
         }
       },
       "error": {
-        "no_searxng": "No SearXNG URL is set on the hub. Reconfigure the LLM Watch integration first.",
-        "cannot_connect": "Could not reach SearXNG or fetch the result pages.",
-        "no_content": "The search returned nothing readable. Check SearXNG's URL and that its JSON format is enabled, or broaden the description.",
+        "cannot_connect": "Could not reach the search backend or fetch the result pages.",
+        "no_content": "The search returned nothing readable. Check the hub's backend settings, or broaden the description.",
         "ai_task_error": "The AI task failed. Check that an AI Task entity exists, and see the log for details.",
-        "bad_model_reply": "The model did not return usable data. Try a different model."
+        "bad_model_reply": "The model did not return usable data. Try a different model.",
+        "no_backend": "The hub's search backend isn't configured. Reconfigure the LLM Watch integration first (pick a backend and enter its URL or API key)."
       },
       "abort": {
         "reconfigure_successful": "Watch updated."
@@ -143,6 +160,13 @@
         "auto": "Auto-detect",
         "html": "HTML page",
         "json": "JSON API"
+      }
+    },
+    "backend": {
+      "options": {
+        "tavily": "Tavily (cloud, free tier, recommended)",
+        "searxng": "SearXNG (self-hosted)",
+        "brave": "Brave Search (cloud, free tier)"
       }
     }
   }
