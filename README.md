@@ -87,7 +87,7 @@ automation:
           message: >-
             {{ trigger.event.data.summary }}
             {% for item in trigger.event.data.items %}
-            • {{ item.name }}{% if item.price %} — £{{ item.price }}{% endif %} ({{ item.source }})
+            • {{ item.name }}{% if item.price %} — £{{ item.price }}{% endif %} {{ item.link or item.source }}
             {% endfor %}
 
   - alias: "Price dropped"

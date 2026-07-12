@@ -97,6 +97,9 @@ RESULT_STRUCTURE = vol.Schema(
                     "availability": {"selector": {"text": {}}},
                     "in_stock": {"selector": {"boolean": {}}},
                     "detail": {"selector": {"text": {}}},
+                    "link_ref": {
+                        "selector": {"number": {"mode": "box", "step": 1}}
+                    },
                 },
             }
         ),
@@ -122,8 +125,8 @@ QUERY_STRUCTURE = vol.Schema(
 
 async def fetch_page_text(
     session: aiohttp.ClientSession, url: str, mode: str = MODE_AUTO
-) -> str:
-    """Fetch a URL and reduce it to model-readable text."""
+) -> tuple[str, list[str]]:
+    """Fetch a URL and reduce it to model-readable text plus a link list."""
     async with asyncio.timeout(FETCH_TIMEOUT):
         resp = await session.get(url, headers=_FETCH_HEADERS)
         resp.raise_for_status()
@@ -131,16 +134,16 @@ async def fetch_page_text(
         content_type = resp.headers.get("Content-Type")
 
     if mode == MODE_JSON or (mode == MODE_AUTO and looks_like_json(content_type, body)):
-        page_text = clean_json(body)
+        page_text, links = clean_json(body), []
     else:
-        page_text = clean_html(body)
+        page_text, links = clean_html(body, url)
 
     if len(page_text.strip()) < 50:
         raise UpdateFailed(
             "Page produced almost no text. It is probably rendered with "
             "JavaScript; point the watch at the site's JSON API instead."
         )
-    return page_text
+    return page_text, links
 
 
 async def _extract(
@@ -150,6 +153,7 @@ async def _extract(
     prompt: str,
     url: str,
     page_text: str,
+    links: list[str] | None = None,
     shopping: bool = False,
 ) -> dict[str, Any]:
     """One extraction call against the AI Task provider."""
@@ -160,7 +164,7 @@ async def _extract(
         instructions=build_extract_instructions(prompt, url, page_text, shopping),
         structure=RESULT_STRUCTURE,
     )
-    return parse_result(task_result.data)
+    return parse_result(task_result.data, links)
 
 
 def _apply_criteria(result: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
@@ -185,7 +189,7 @@ async def run_page_check(
 ) -> dict[str, Any]:
     """Check a single page watch. Shared with the config flow."""
     session = async_get_clientsession(hass)
-    page_text = await fetch_page_text(
+    page_text, links = await fetch_page_text(
         session, config[CONF_URL], config.get(CONF_MODE, MODE_AUTO)
     )
     entity_id = config.get(CONF_AI_TASK_ENTITY) or hub.get(CONF_AI_TASK_ENTITY)
@@ -196,7 +200,8 @@ async def run_page_check(
         config[CONF_PROMPT],
         config[CONF_URL],
         page_text,
-        bool(config.get(CONF_SHOPPING_ONLY)),
+        links=links,
+        shopping=bool(config.get(CONF_SHOPPING_ONLY)),
     )
     for item in result["items"]:
         item["source"] = config[CONF_URL]
@@ -254,12 +259,14 @@ async def run_search_check(
         url = cand["url"]
         try:
             if cand.get("content") and len(cand["content"].strip()) >= 50:
-                # Backend supplied extracted content (Tavily): no fetch needed.
-                page_text = cand["content"][:MAX_CONTENT_CHARS]
+                # Backend supplied extracted content (Tavily): no fetch, and
+                # no per-item links since the content arrives as plain text.
+                page_text, links = cand["content"][:MAX_CONTENT_CHARS], []
             else:
-                page_text = await fetch_page_text(session, url)
+                page_text, links = await fetch_page_text(session, url)
             result = await _extract(
-                hass, name, entity_id, prompt, url, page_text, shopping
+                hass, name, entity_id, prompt, url, page_text,
+                links=links, shopping=shopping,
             )
         except (TimeoutError, aiohttp.ClientError, UpdateFailed, ValueError) as err:
             _LOGGER.debug("Skipping candidate %s: %s", url, err)

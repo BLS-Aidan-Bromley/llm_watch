@@ -212,17 +212,23 @@ async def _test_watch(
 
 def _preview_placeholders(preview: dict[str, Any]) -> dict[str, str]:
     items = preview["items"]
-    item_lines = "\n".join(
-        f"- {i['name']}"
-        + (f" — {i['price']}" if i.get("price") is not None else "")
-        + (f" ({i['availability']})" if i.get("availability") else "")
-        + (f" [{i['source']}]" if i.get("source") else "")
-        for i in items[:10]
-    )
+    lines = []
+    for i in items[:10]:
+        head = f"- {i['name']}"
+        if i.get("price") is not None:
+            head += f" — {i['price']}"
+        if i.get("availability"):
+            head += f" ({i['availability']})"
+        lines.append(head)
+        # URL on its own line, nothing adjacent, so clients don't fold a
+        # trailing bracket into the link.
+        link = i.get("link") or i.get("source")
+        if link:
+            lines.append(f"  {link}")
     return {
         "found": "yes" if preview["found"] else "no",
         "summary": preview["summary"] or "(none)",
-        "items": item_lines or "(none)",
+        "items": "\n".join(lines) or "(none)",
     }
 
 

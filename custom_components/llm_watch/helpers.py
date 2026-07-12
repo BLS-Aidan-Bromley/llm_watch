@@ -9,11 +9,11 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from .const import MAX_CONTENT_CHARS
+from .const import MAX_CONTENT_CHARS, MAX_LINKS
 
 # Tags that never contain content worth sending to the model.
 _STRIP_TAGS = ["script", "style", "noscript", "svg", "iframe", "head", "template"]
@@ -27,8 +27,12 @@ EXTRACT_TEMPLATE = (
     "currency symbols. Set in_stock true only if the page indicates the item "
     "can be bought or obtained now; false if it says out of stock, sold out "
     "or unavailable; leave it unset if the page does not say. "
-    "Never output any URLs or links in any field; leave links out entirely. "
-    "{shopping_rule}"
+    "Never write out a URL yourself in any field. Instead, when the page "
+    "content includes a LINKS list (numbered L1, L2, ...), set each item's "
+    "link_ref to the number of the link that points to that specific "
+    "product's own page. Choose the most specific product link, not a "
+    "category or listing link. If no link clearly belongs to the item, leave "
+    "link_ref unset. {shopping_rule}"
     "If nothing matches, return found=false with an empty items list and a "
     "one-sentence summary of what the page showed instead. Never invent items "
     "that are not on the page.\n\n"
@@ -74,6 +78,22 @@ def _strip_urls(value: Any) -> Any:
     return cleaned or None
 
 
+def _resolve_link(link_ref: Any, links: list[str]) -> str | None:
+    """Map a model-chosen L-number to its real URL. Ignore anything else."""
+    if link_ref is None:
+        return None
+    ref = link_ref
+    if isinstance(ref, str):
+        match = re.search(r"\d+", ref)
+        ref = int(match.group()) if match else None
+    if not isinstance(ref, int):
+        return None
+    idx = ref - 1
+    if 0 <= idx < len(links):
+        return links[idx]
+    return None
+
+
 def host_of(url: str) -> str:
     """Bare hostname of a URL, without a leading www."""
     netloc = urlparse(url).netloc or url
@@ -96,17 +116,64 @@ def is_blocked(url: str, blocklist: list[str]) -> bool:
     return any(host == b or host.endswith("." + b) for b in blocklist)
 
 
-def clean_html(raw: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
-    """Reduce an HTML document to readable text for the model."""
+def clean_html(
+    raw: str, base_url: str = "", max_chars: int = MAX_CONTENT_CHARS
+) -> tuple[str, list[str]]:
+    """Reduce an HTML document to readable text plus a link catalogue.
+
+    Returns (page_text, links). page_text ends with a LINKS section listing
+    up to MAX_LINKS product-ish anchors as "L1 <text> -> <url>", so the model
+    can reference a real URL by number instead of writing one. links[i] is the
+    absolute URL for reference L(i+1).
+    """
     soup = BeautifulSoup(raw, "html.parser")
     for tag in soup(_STRIP_TAGS):
         tag.decompose()
+
+    links = _extract_links(soup, base_url)
     text = soup.get_text(separator="\n")
     lines = [ln.strip() for ln in text.splitlines()]
     lines = [ln for ln in lines if ln]
     text = "\n".join(lines)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text[:max_chars]
+
+    if links:
+        catalogue = "\n".join(
+            f"L{i + 1} {label} -> {url}" for i, (label, url) in enumerate(links)
+        )
+        budget = max(0, max_chars - len(catalogue) - 20)
+        text = text[:budget] + "\n\nLINKS:\n" + catalogue
+    else:
+        text = text[:max_chars]
+    return text, [url for _, url in links]
+
+
+def _extract_links(soup: Any, base_url: str) -> list[tuple[str, str]]:
+    """Collect distinct, plausible product links as (label, absolute_url)."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    base_host = host_of(base_url) if base_url else ""
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        url = urljoin(base_url, href) if base_url else href
+        if not url.startswith("http"):
+            continue
+        # Same-site only: off-site links are rarely the product page.
+        if base_host and host_of(url) != base_host:
+            continue
+        key = url.split("#")[0].rstrip("/")
+        if key in seen:
+            continue
+        label = " ".join(a.get_text(separator=" ").split())[:80]
+        if not label:
+            continue
+        seen.add(key)
+        out.append((label, url))
+        if len(out) >= MAX_LINKS:
+            break
+    return out
 
 
 def clean_json(raw: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
@@ -164,12 +231,14 @@ def parse_queries(content: Any, max_queries: int) -> list[str]:
     return queries[:max_queries]
 
 
-def parse_result(content: Any) -> dict[str, Any]:
+def parse_result(content: Any, links: list[str] | None = None) -> dict[str, Any]:
     """Normalise the AI Task extraction result.
 
-    Accepts a dict (the usual case) or a JSON string. Raises ValueError
-    if the reply is not usable.
+    Accepts a dict (the usual case) or a JSON string. If a links catalogue is
+    given, an item's link_ref number is resolved to that real URL. Raises
+    ValueError if the reply is not usable.
     """
+    links = links or []
     data = content
     if isinstance(data, str):
         try:
@@ -199,6 +268,7 @@ def parse_result(content: Any) -> dict[str, Any]:
                     "availability": _strip_urls(entry.get("availability")),
                     "in_stock": in_stock,
                     "detail": _strip_urls(entry.get("detail")),
+                    "link": _resolve_link(entry.get("link_ref"), links),
                 }
             )
 

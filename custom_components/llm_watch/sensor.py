@@ -103,4 +103,7 @@ class LlmWatchBestPriceSensor(_Base):
         if not priced:
             return None
         cheapest = min(priced, key=lambda i: i["price"])
-        return {"item": cheapest["name"], "source": cheapest.get("source")}
+        return {
+            "item": cheapest["name"],
+            "link": cheapest.get("link") or cheapest.get("source"),
+        }

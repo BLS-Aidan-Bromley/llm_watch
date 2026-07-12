@@ -48,6 +48,10 @@ MAX_QUERIES = 3
 MAX_RESULTS_PER_QUERY = 3
 MAX_PAGES = 5
 
+# Most anchor links catalogued from a fetched HTML page and offered to the
+# model so it can attribute each item to a real product URL by number.
+MAX_LINKS = 40
+
 # Forum, review, roundup and aggregator sites dropped from shopping searches
 # before any page is fetched. Editable per watch.
 DEFAULT_BLOCKLIST = [
