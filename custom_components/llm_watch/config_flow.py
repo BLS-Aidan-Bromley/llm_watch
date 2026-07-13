@@ -41,13 +41,17 @@ from .const import (
     CONF_NAME,
     CONF_PROMPT,
     CONF_BLOCKLIST,
+    CONF_MAX_ROUNDS,
     CONF_REQUIRE_IN_STOCK,
     CONF_SCAN_INTERVAL_HOURS,
     CONF_SHOPPING_ONLY,
+    CONF_VERIFY,
     CONF_SEARXNG_URL,
     CONF_SITES,
     CONF_URL,
+    DEFAULT_MAX_ROUNDS,
     DEFAULT_SCAN_INTERVAL_HOURS,
+    DEFAULT_VERIFY,
     DOMAIN,
     MODE_AUTO,
     MODES,
@@ -145,6 +149,21 @@ def _watch_schema(kind: str, defaults: dict[str, Any]) -> vol.Schema:
             defaults,
             TextSelector(TextSelectorConfig(multiline=True)),
         )
+        schema[
+            vol.Required(
+                CONF_VERIFY, default=defaults.get(CONF_VERIFY, DEFAULT_VERIFY)
+            )
+        ] = bool
+        schema[
+            vol.Required(
+                CONF_MAX_ROUNDS,
+                default=defaults.get(CONF_MAX_ROUNDS, DEFAULT_MAX_ROUNDS),
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=1, max=5, step=1, mode=NumberSelectorMode.BOX
+            )
+        )
     schema[
         vol.Required(
             CONF_REQUIRE_IN_STOCK,
@@ -183,6 +202,8 @@ def _watch_schema(kind: str, defaults: dict[str, Any]) -> vol.Schema:
 def _normalise_watch_input(user_input: dict[str, Any]) -> bool:
     """Coerce numbers and pop the test toggle. Returns create_anyway."""
     user_input[CONF_SCAN_INTERVAL_HOURS] = int(user_input[CONF_SCAN_INTERVAL_HOURS])
+    if user_input.get(CONF_MAX_ROUNDS) is not None:
+        user_input[CONF_MAX_ROUNDS] = int(user_input[CONF_MAX_ROUNDS])
     if user_input.get(CONF_MAX_PRICE) is not None:
         user_input[CONF_MAX_PRICE] = float(user_input[CONF_MAX_PRICE])
     return bool(user_input.pop(CONF_CREATE_ANYWAY, False))

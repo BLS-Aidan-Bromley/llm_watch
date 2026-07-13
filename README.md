@@ -10,12 +10,24 @@ searches, your own SearXNG instance. No CSS selectors, no scrape configs.
 **Page watch** — watches one URL. "Is there a portable air conditioning unit
 on this page?"
 
-**Web search watch** — no URL. Each run, the AI writes search queries from
-your description, SearXNG finds candidate pages, each page is fetched and
-judged by the AI against your description, and the results are merged. Optional
-criteria: shopping-results-only (drops forums, reviews and roundups), only
-count items that are in stock, and a maximum price. Optionally restrict the
-search to specific retail sites, which is the reliable way to do stock checks.
+**Web search watch** — no URL. This runs a deliberately thorough two-pass
+hunt, not a quick scan:
+
+1. *Discovery.* The AI writes search queries, the backend finds candidate
+   pages, and items are gathered. Shopify retailers are read from their own
+   `products.json` (exact prices, stock and product links); other pages are
+   read by the AI.
+2. *Verification.* Every candidate is then visited on its own product page
+   and independently confirmed: is this really the product, does the price
+   hold, is it in stock? Anything that fails, or can't be read, is dropped,
+   never suggested. Shopify products are confirmed from the store's JSON;
+   others are re-read and checked by the AI.
+
+If a round verifies nothing, it searches again with fresh queries, up to the
+max-rounds limit (default 3), then reports only what passed, or nothing.
+A run takes minutes, by design. Optional criteria: shopping-results-only
+(drops forums, reviews and roundups), in stock only, and a maximum price.
+Turn verification off for a fast, unchecked scan.
 
 Every watch gives you:
 

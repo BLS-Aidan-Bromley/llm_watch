@@ -25,6 +25,8 @@ CONF_SHOPPING_ONLY = "shopping_only"
 CONF_BLOCKLIST = "blocklist"
 CONF_MAX_PRICE = "max_price"
 CONF_SCAN_INTERVAL_HOURS = "scan_interval_hours"
+CONF_MAX_ROUNDS = "max_rounds"
+CONF_VERIFY = "verify"
 CONF_CREATE_ANYWAY = "create_anyway"
 
 SUBENTRY_PAGE_WATCH = "page_watch"
@@ -51,6 +53,13 @@ MAX_PAGES = 5
 # Most anchor links catalogued from a fetched HTML page and offered to the
 # model so it can attribute each item to a real product URL by number.
 MAX_LINKS = 40
+
+# Verification pass defaults. Discovery finds candidates; verification visits
+# each candidate's own page to confirm price and stock before it is surfaced.
+DEFAULT_MAX_ROUNDS = 3
+DEFAULT_VERIFY = True
+MAX_CANDIDATES_PER_ROUND = 8
+MAX_VERIFIED_ITEMS = 10
 
 # Forum, review, roundup and aggregator sites dropped from shopping searches
 # before any page is fetched. Editable per watch.

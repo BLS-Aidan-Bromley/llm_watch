@@ -205,6 +205,66 @@ def build_extract_instructions(
     )
 
 
+VERIFY_TEMPLATE = (
+    "You are verifying one product against a shopper's requirement, using the "
+    "text of that product's own page. Answer only from this page; do not use "
+    "outside knowledge. Confirm three things: (1) the page really is for a "
+    "product matching the requirement, (2) the price, (3) whether it is in "
+    "stock and buyable now. Set matches=true only if the product on this page "
+    "genuinely fits the requirement. Set in_stock=true only if the page shows "
+    "it can be added to basket / bought now; false if it says sold out, out of "
+    "stock, unavailable or backorder; leave unset if unclear. Price is a number "
+    "with no currency symbol. If the page is not a single product page (e.g. a "
+    "category, search or article page), set matches=false.\n\n"
+    "Requirement: {prompt}\n\n"
+    "Product page URL: {url}\n\n"
+    "Product page content:\n{page_text}"
+)
+
+
+def build_verify_instructions(prompt: str, url: str, page_text: str) -> str:
+    """Instructions for the per-product verification pass."""
+    return VERIFY_TEMPLATE.format(prompt=prompt, url=url, page_text=page_text)
+
+
+def parse_verification(content: Any) -> dict[str, Any]:
+    """Normalise the verification result into matches/name/price/in_stock."""
+    data = content
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (json.JSONDecodeError, TypeError) as err:
+            raise ValueError(f"Verifier did not return valid JSON: {err}") from err
+    if not isinstance(data, dict) or "matches" not in data:
+        raise ValueError("Verifier reply is missing the 'matches' field")
+    price = data.get("price")
+    if isinstance(price, str):
+        m = re.search(r"\d+(?:[.,]\d+)?", price)
+        price = float(m.group().replace(",", ".")) if m else None
+    in_stock = data.get("in_stock")
+    if in_stock is not None:
+        in_stock = bool(in_stock)
+    return {
+        "matches": bool(data["matches"]),
+        "name": _strip_urls(data.get("name")),
+        "price": price,
+        "in_stock": in_stock,
+    }
+
+
+def price_agrees(claimed: float | None, verified: float | None, tol: float = 0.15) -> bool:
+    """True if the verified price is within tolerance of the claimed one.
+
+    If either price is missing we don't fail on price alone (stock and
+    match are the harder gates); a present pair must agree within 15%.
+    """
+    if claimed is None or verified is None:
+        return True
+    if verified <= 0:
+        return False
+    return abs(verified - claimed) / verified <= tol
+
+
 def build_query_instructions(prompt: str, shopping: bool = False) -> str:
     """Build the query generation instructions for the AI Task."""
     target = QUERY_TARGET_SHOPPING if shopping else QUERY_TARGET_GENERAL

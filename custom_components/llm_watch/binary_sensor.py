@@ -64,6 +64,8 @@ class LlmWatchFoundSensor(CoordinatorEntity[LlmWatchCoordinator], BinarySensorEn
         if self.coordinator.is_search:
             attrs["queries"] = self.coordinator.data.get("queries")
             attrs["pages_checked"] = self.coordinator.data.get("pages_checked")
+            attrs["rounds_run"] = self.coordinator.data.get("rounds_run")
+            attrs["verified"] = self.coordinator.data.get("verified")
         else:
             attrs["url"] = self.coordinator.config.get(CONF_URL)
         return attrs

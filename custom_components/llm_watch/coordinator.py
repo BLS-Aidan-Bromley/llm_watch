@@ -28,19 +28,25 @@ from .const import (
     CONF_NAME,
     CONF_PROMPT,
     CONF_BLOCKLIST,
+    CONF_MAX_ROUNDS,
     CONF_REQUIRE_IN_STOCK,
     CONF_SCAN_INTERVAL_HOURS,
     CONF_SHOPPING_ONLY,
+    CONF_VERIFY,
     CONF_SITES,
     CONF_URL,
     DEFAULT_BLOCKLIST,
+    DEFAULT_MAX_ROUNDS,
     DEFAULT_SCAN_INTERVAL_HOURS,
+    DEFAULT_VERIFY,
     DOMAIN,
     EVENT_FOUND,
     EVENT_PRICE_DROP,
     FETCH_TIMEOUT,
+    MAX_CANDIDATES_PER_ROUND,
     MAX_PAGES,
     MAX_QUERIES,
+    MAX_VERIFIED_ITEMS,
     MODE_AUTO,
     MODE_JSON,
     SUBENTRY_SEARCH_WATCH,
@@ -49,6 +55,7 @@ from .helpers import (
     best_price,
     build_extract_instructions,
     build_query_instructions,
+    build_verify_instructions,
     clean_html,
     clean_json,
     filter_items,
@@ -56,8 +63,11 @@ from .helpers import (
     parse_blocklist,
     parse_queries,
     parse_result,
+    parse_verification,
+    price_agrees,
 )
 from .search import backend_ready, gather_candidates
+from .shopify import fetch_collection_products, verify_product
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -103,6 +113,25 @@ RESULT_STRUCTURE = vol.Schema(
                 },
             }
         ),
+    }
+)
+
+VERIFY_STRUCTURE = vol.Schema(
+    {
+        vol.Required(
+            "matches",
+            description="Whether this product page matches the requirement",
+        ): selector.selector({"boolean": {}}),
+        vol.Required(
+            "name", description="The product name as shown on the page"
+        ): selector.selector({"text": {}}),
+        vol.Required(
+            "price", description="The price as a number, no currency symbol"
+        ): selector.selector({"number": {"mode": "box", "step": 0.01}}),
+        vol.Required(
+            "in_stock",
+            description="True if buyable now, false if sold out",
+        ): selector.selector({"boolean": {}}),
     }
 )
 
@@ -210,10 +239,132 @@ async def run_page_check(
     return result
 
 
+async def _discover(
+    hass, session, hub, config, entity_id, queries, shopping
+) -> list[dict[str, Any]]:
+    """Pass one: produce candidate items from search results.
+
+    Shopify collection pages are read from products.json (exact data). Other
+    pages are read by the model. Each candidate carries its own product link
+    where possible, which pass two will visit.
+    """
+    blocklist = (
+        parse_blocklist(config.get(CONF_BLOCKLIST), DEFAULT_BLOCKLIST)
+        if shopping
+        else None
+    )
+    candidates = await gather_candidates(
+        session, hub, queries, config.get(CONF_SITES), MAX_PAGES, blocklist
+    )
+    items: list[dict[str, Any]] = []
+    pages_read = 0
+    for cand in candidates:
+        url = cand["url"]
+
+        # Shopify collection: pull structured products directly.
+        shop_items = await fetch_collection_products(
+            session, url, MAX_CANDIDATES_PER_ROUND
+        )
+        if shop_items is not None:
+            pages_read += 1
+            items.extend(shop_items)
+            continue
+
+        # Otherwise read the page (backend content, or fetch) with the model.
+        try:
+            if cand.get("content") and len(cand["content"].strip()) >= 50:
+                page_text, links = cand["content"][:MAX_CONTENT_CHARS], []
+            else:
+                page_text, links = await fetch_page_text(session, url)
+            result = await _extract(
+                hass, config[CONF_NAME], entity_id, config[CONF_PROMPT],
+                url, page_text, links=links, shopping=shopping,
+            )
+        except (TimeoutError, aiohttp.ClientError, UpdateFailed, ValueError) as err:
+            _LOGGER.debug("Discovery skipped %s: %s", url, err)
+            continue
+        pages_read += 1
+        if result["found"]:
+            for item in result["items"]:
+                item.setdefault("source", url)
+                item.setdefault("link", None)
+                item["verified"] = False
+            items.extend(result["items"])
+    return items, pages_read
+
+
+async def _verify_one(
+    hass, session, config, entity_id, item
+) -> dict[str, Any] | None:
+    """Pass two: confirm one candidate on its own product page.
+
+    Returns the item (with confirmed price/stock) if it checks out, else None.
+    Items that came straight from Shopify JSON are already trustworthy.
+    """
+    if item.get("verified"):
+        return item
+
+    link = item.get("link") or item.get("source")
+    if not link:
+        return None  # nothing to verify against -> drop
+
+    # Shopify product page: authoritative JSON, no model needed.
+    shop_item = await verify_product(session, link)
+    if shop_item is not None:
+        if not price_agrees(item.get("price"), shop_item.get("price")):
+            _LOGGER.debug("Price disagreement dropped: %s", link)
+            return None
+        return shop_item
+
+    # Generic product page: fetch it and ask the model to confirm.
+    try:
+        page_text, _ = await fetch_page_text(session, link)
+    except (TimeoutError, aiohttp.ClientError, UpdateFailed) as err:
+        _LOGGER.debug("Verify fetch failed, dropping %s: %s", link, err)
+        return None
+    try:
+        task = await async_generate_data(
+            hass,
+            task_name=f"LLM Watch verify: {config[CONF_NAME]}",
+            entity_id=entity_id or None,
+            instructions=build_verify_instructions(
+                config[CONF_PROMPT], link, page_text
+            ),
+            structure=VERIFY_STRUCTURE,
+        )
+        verdict = parse_verification(task.data)
+    except (HomeAssistantError, ValueError) as err:
+        _LOGGER.debug("Verify model failed, dropping %s: %s", link, err)
+        return None
+
+    if not verdict["matches"]:
+        return None
+    if not price_agrees(item.get("price"), verdict.get("price")):
+        return None
+    return {
+        "name": verdict["name"] or item.get("name"),
+        "price": verdict.get("price") if verdict.get("price") is not None else item.get("price"),
+        "availability": "in stock" if verdict.get("in_stock") else (
+            "out of stock" if verdict.get("in_stock") is False else None
+        ),
+        "in_stock": verdict.get("in_stock"),
+        "detail": item.get("detail"),
+        "link": link,
+        "source": item.get("source", link),
+        "verified": True,
+    }
+
+
 async def run_search_check(
     hass: HomeAssistant, config: dict[str, Any], hub: dict[str, Any]
 ) -> dict[str, Any]:
-    """Check a search watch: queries -> SearXNG -> pages -> extraction."""
+    """Two-pass search watch: discover candidates, verify each, retry if none.
+
+    Deliberately thorough, not fast: every surfaced item has been confirmed
+    on its own product page for price and stock. If a round yields nothing
+    verified, it re-searches with fresh queries up to a bounded number of
+    rounds, then reports only what passed (or nothing).
+    """
     if backend_ready(hub) is None:
         raise UpdateFailed(
             "The search backend on the LLM Watch hub is not configured "
@@ -224,76 +375,103 @@ async def run_search_check(
     entity_id = config.get(CONF_AI_TASK_ENTITY) or hub.get(CONF_AI_TASK_ENTITY)
     name = config[CONF_NAME]
     prompt = config[CONF_PROMPT]
-
     shopping = bool(config.get(CONF_SHOPPING_ONLY))
-    query_result = await async_generate_data(
-        hass,
-        task_name=f"LLM Watch queries: {name}",
-        entity_id=entity_id or None,
-        instructions=build_query_instructions(prompt, shopping),
-        structure=QUERY_STRUCTURE,
-    )
-    queries = parse_queries(query_result.data, MAX_QUERIES)
-    if not queries:
-        # Model failed to produce queries; fall back to the raw description.
-        queries = [prompt[:100]]
+    verify = bool(config.get(CONF_VERIFY, DEFAULT_VERIFY))
+    max_rounds = int(config.get(CONF_MAX_ROUNDS, DEFAULT_MAX_ROUNDS))
 
-    blocklist = (
-        parse_blocklist(config.get(CONF_BLOCKLIST), DEFAULT_BLOCKLIST)
-        if shopping
-        else None
-    )
-    candidates = await gather_candidates(
-        session, hub, queries, config.get(CONF_SITES), MAX_PAGES, blocklist
-    )
-    if not candidates:
-        raise UpdateFailed(
-            "The search returned no results. Check the backend settings on "
-            "the hub (URL / API key) and that the description is searchable."
-        )
+    verified: list[dict[str, Any]] = []
+    all_queries: list[str] = []
+    rounds_run = 0
+    pages_total = 0
+    tried_dropped = 0
 
-    all_items: list[dict[str, Any]] = []
-    summaries: list[str] = []
-    pages_checked = 0
-    for cand in candidates:
-        url = cand["url"]
-        try:
-            if cand.get("content") and len(cand["content"].strip()) >= 50:
-                # Backend supplied extracted content (Tavily): no fetch, and
-                # no per-item links since the content arrives as plain text.
-                page_text, links = cand["content"][:MAX_CONTENT_CHARS], []
-            else:
-                page_text, links = await fetch_page_text(session, url)
-            result = await _extract(
-                hass, name, entity_id, prompt, url, page_text,
-                links=links, shopping=shopping,
+    for round_no in range(1, max_rounds + 1):
+        rounds_run = round_no
+        avoid = ""
+        if all_queries:
+            avoid = (
+                " Avoid repeating these earlier queries, try different angles, "
+                f"retailers or wording: {'; '.join(all_queries)}."
             )
-        except (TimeoutError, aiohttp.ClientError, UpdateFailed, ValueError) as err:
-            _LOGGER.debug("Skipping candidate %s: %s", url, err)
-            continue
-        pages_checked += 1
-        if result["found"]:
-            for item in result["items"]:
-                item["source"] = url
-            all_items.extend(result["items"])
-            summaries.append(result["summary"])
+        query_result = await async_generate_data(
+            hass,
+            task_name=f"LLM Watch queries: {name} (round {round_no})",
+            entity_id=entity_id or None,
+            instructions=build_query_instructions(prompt, shopping) + avoid,
+            structure=QUERY_STRUCTURE,
+        )
+        queries = parse_queries(query_result.data, MAX_QUERIES) or [prompt[:100]]
+        all_queries.extend(queries)
 
-    if pages_checked == 0:
-        raise UpdateFailed(
-            "None of the search results could be read (JavaScript-only pages "
-            "or fetch failures)."
+        candidates, pages_read = await _discover(
+            hass, session, hub, config, entity_id, queries, shopping
+        )
+        pages_total += pages_read
+
+        # Apply the user's criteria before spending verification calls.
+        candidates = filter_items(
+            candidates,
+            bool(config.get(CONF_REQUIRE_IN_STOCK)),
+            config.get(CONF_MAX_PRICE),
         )
 
-    aggregated = {
-        "found": bool(all_items),
-        "summary": " ".join(summaries[:3]) if summaries else "Nothing matched.",
-        "items": all_items,
+        if not verify:
+            verified.extend(candidates)
+        else:
+            for item in candidates:
+                confirmed = await _verify_one(
+                    hass, session, config, entity_id, item
+                )
+                if confirmed is None:
+                    tried_dropped += 1
+                    continue
+                # Re-apply criteria to the confirmed figures.
+                kept = filter_items(
+                    [confirmed],
+                    bool(config.get(CONF_REQUIRE_IN_STOCK)),
+                    config.get(CONF_MAX_PRICE),
+                )
+                verified.extend(kept)
+                if len(verified) >= MAX_VERIFIED_ITEMS:
+                    break
+
+        # De-duplicate by link/name.
+        seen: set = set()
+        deduped: list[dict[str, Any]] = []
+        for it in verified:
+            key = it.get("link") or it.get("name")
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(it)
+        verified = deduped
+
+        if verified:
+            break  # got something confirmed; stop early
+
+    found = bool(verified)
+    if found:
+        summary = (
+            f"Verified {len(verified)} item(s) across {rounds_run} search "
+            f"round(s)."
+        )
+    else:
+        summary = (
+            f"Nothing could be verified after {rounds_run} round(s); "
+            f"{tried_dropped} candidate(s) failed price/stock checks or "
+            "could not be read."
+        )
+
+    return {
+        "found": found,
+        "summary": summary,
+        "items": verified[:MAX_VERIFIED_ITEMS],
+        "queries": all_queries,
+        "rounds_run": rounds_run,
+        "pages_checked": pages_total,
+        "verified": verify,
+        "checked_at": dt_util.now().isoformat(),
     }
-    aggregated = _apply_criteria(aggregated, config)
-    aggregated["queries"] = queries
-    aggregated["pages_checked"] = pages_checked
-    aggregated["checked_at"] = dt_util.now().isoformat()
-    return aggregated
 
 
 class LlmWatchCoordinator(DataUpdateCoordinator[dict[str, Any]]):
