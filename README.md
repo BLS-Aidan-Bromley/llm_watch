@@ -21,7 +21,10 @@ hunt, not a quick scan:
    and independently confirmed: is this really the product, does the price
    hold, is it in stock? Anything that fails, or can't be read, is dropped,
    never suggested. Shopify products are confirmed from the store's JSON;
-   others are re-read and checked by the AI.
+   WooCommerce products from the Store API; others are re-read and checked
+   by the AI, and only when the item has its own product page. A candidate
+   whose only link is a shared listing page is dropped as unverifiable,
+   because that is how names and prices get crossed.
 
 If a round verifies nothing, it searches again with fresh queries, up to the
 max-rounds limit (default 3), then reports only what passed, or nothing.

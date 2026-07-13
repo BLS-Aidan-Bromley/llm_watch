@@ -9,6 +9,7 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
+from urllib.parse import urlparse
 
 from homeassistant.components.ai_task import async_generate_data
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
@@ -67,7 +68,9 @@ from .helpers import (
     price_agrees,
 )
 from .search import backend_ready, gather_candidates
-from .shopify import fetch_collection_products, verify_product
+from .shopify import fetch_collection_products
+from .shopify import verify_product as shopify_verify
+from . import woocommerce
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -258,6 +261,8 @@ async def _discover(
     )
     items: list[dict[str, Any]] = []
     pages_read = 0
+    woo_hosts_tried: set[str] = set()
+    search_term = queries[0] if queries else config[CONF_PROMPT][:80]
     for cand in candidates:
         url = cand["url"]
 
@@ -269,6 +274,19 @@ async def _discover(
             pages_read += 1
             items.extend(shop_items)
             continue
+
+        # WooCommerce site: search its Store API directly (exact data).
+        # One probe per host per round.
+        host = urlparse(url).netloc
+        if host not in woo_hosts_tried:
+            woo_hosts_tried.add(host)
+            woo_items = await woocommerce.search_products(
+                session, url, search_term, MAX_CANDIDATES_PER_ROUND
+            )
+            if woo_items is not None:
+                pages_read += 1
+                items.extend(woo_items)
+                continue
 
         # Otherwise read the page (backend content, or fetch) with the model.
         try:
@@ -304,17 +322,32 @@ async def _verify_one(
     if item.get("verified"):
         return item
 
-    link = item.get("link") or item.get("source")
-    if not link:
-        return None  # nothing to verify against -> drop
+    # A candidate must have its own product link. Verifying against a shared
+    # listing/category page is how names and prices get crossed, so those are
+    # dropped as unverifiable rather than guessed at.
+    link = item.get("link")
+    if not link or link == item.get("source"):
+        _LOGGER.debug(
+            "Dropping '%s': no individual product page to verify against",
+            item.get("name"),
+        )
+        return None
 
     # Shopify product page: authoritative JSON, no model needed.
-    shop_item = await verify_product(session, link)
+    shop_item = await shopify_verify(session, link)
     if shop_item is not None:
         if not price_agrees(item.get("price"), shop_item.get("price")):
             _LOGGER.debug("Price disagreement dropped: %s", link)
             return None
         return shop_item
+
+    # WooCommerce product page: same idea via the Store API.
+    woo_item = await woocommerce.verify_product(session, link)
+    if woo_item is not None:
+        if not price_agrees(item.get("price"), woo_item.get("price")):
+            _LOGGER.debug("Price disagreement dropped: %s", link)
+            return None
+        return woo_item
 
     # Generic product page: fetch it and ask the model to confirm.
     try:
